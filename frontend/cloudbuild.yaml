@@ -1,0 +1,11 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg'
+      - 'NEXT_PUBLIC_API_URL=https://marketintel-631545360913.us-central1.run.app'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/marketintel-493113/marketintel/frontend:latest'
+      - '.'
+images:
+  - 'us-central1-docker.pkg.dev/marketintel-493113/marketintel/frontend:latest'

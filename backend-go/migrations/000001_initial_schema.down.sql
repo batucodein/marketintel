@@ -1,0 +1,14 @@
+DROP TABLE IF EXISTS price_snapshots;
+DROP TABLE IF EXISTS market_analyses;
+DROP TABLE IF EXISTS lead_scores;
+DROP TABLE IF EXISTS competitors;
+DROP TABLE IF EXISTS business_markets;
+DROP TABLE IF EXISTS searches;
+DROP TABLE IF EXISTS market_rankings;
+DROP TABLE IF EXISTS ai_request_log;
+DROP TABLE IF EXISTS markets;
+DROP TABLE IF EXISTS trade_flows;
+DROP TABLE IF EXISTS businesses;
+DROP TABLE IF EXISTS product_categories;
+DROP TABLE IF EXISTS users;
+DROP EXTENSION IF EXISTS "uuid-ossp";
