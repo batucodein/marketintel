@@ -29,14 +29,14 @@ type MarketMetadata struct {
 }
 
 // SplitByDestination groups shipment records by consignee country.
-// Records with an unrecognized country are grouped under "UNKNOWN".
+// Records with an unrecognized/missing country are grouped under "ZZ" (ISO-2 unassigned).
 func SplitByDestination(records []ShipmentRecord) []ShipmentGroup {
 	buckets := make(map[string][]ShipmentRecord)
 	var order []string
 	for _, r := range records {
 		code := countryToISO2(r.ConsigneeCountry)
 		if code == "" {
-			code = "UNKNOWN"
+			code = "ZZ"
 		}
 		if _, ok := buckets[code]; !ok {
 			order = append(order, code)

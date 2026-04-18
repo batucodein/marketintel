@@ -88,13 +88,18 @@ func (p *Pipeline) ProcessExcel(
 	var marketIDs []uuid.UUID
 
 	for _, group := range groups {
+		if group.DestinationCountry == "ZZ" {
+			warnings = append(warnings, fmt.Sprintf("%d rows skipped (destination country missing or unrecognized)", len(group.Records)))
+			continue
+		}
 		meta := DeriveMarketMetadata(group)
 		if meta.ImporterCount == 0 {
 			continue
 		}
 
-		marketName := fmt.Sprintf("%s — %s (%s)", meta.DestinationCountry,
-			displayHS(meta.DominantHSCode), uploadedAt.Format("2006-01-02"))
+		// Placeholder name — replaced by AI-derived product name during enrichment.
+		// Kept concise so the card header looks clean even if AI fails.
+		marketName := fmt.Sprintf("%s — %s", displayHS(meta.DominantHSCode), meta.DestinationCountry)
 
 		shipFrom := meta.ShipmentFromDate
 		shipTo := meta.ShipmentToDate
@@ -154,6 +159,13 @@ func (p *Pipeline) ProcessExcel(
 
 		// Capture meta for the async phase
 		go p.runEnrichAndScore(userID, searchID, created.ID, meta)
+	}
+
+	// Propagate warnings we collected during the loop
+	result.Warnings = warnings
+
+	if len(marketIDs) == 0 {
+		return nil, fmt.Errorf("no usable shipments after parsing: %v", warnings)
 	}
 
 	// Persist search state

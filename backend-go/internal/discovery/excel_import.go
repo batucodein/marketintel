@@ -164,7 +164,7 @@ func parseRow(row []string, ci columnIndex) ShipmentRecord {
 		ConsigneeState:     ci.get(row, "Consignee State"),
 		ConsigneeCity:      ci.get(row, "Consignee City"),
 		ConsigneeZip:       ci.get(row, "Zip Code"),
-		ConsigneeCountry:   ci.get(row, "Consignee Country(EN)"),
+		ConsigneeCountry:   ci.get(row, "Consignee Country(EN)", "Consignee Country", "Destination Country", "Country"),
 		ConsigneePhone:     ci.get(row, "Comm No."),
 		ShipperName:        ci.get(row, "Shipper Std Name", "Shipper Name"),
 		ShipperStdName:     ci.get(row, "Shipper Std Name"),
