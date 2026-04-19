@@ -5,6 +5,31 @@ updated: 2026-04-19
 
 # Patterns
 
+## Pluggable messaging transports via a Channel interface
+
+External services we send messages through (Gmail now, WhatsApp/Outlook/SMTP later) live behind `outreach/channel/interface.go::Channel`. Conversation, campaign, and sequence code calls only `Channel.Send` and `Channel.ListNewMessages`; they never import a concrete channel package.
+
+Adding a new channel:
+1. Create `outreach/channel/<name>/<name>.go` implementing the interface.
+2. Register a factory on `DefaultRegistry` in `main.go` during boot: `channel.DefaultRegistry.Register(domain.ChannelTypeFoo, foo.NewFactory(...))`.
+3. Store user-specific config in `user_channels.config_encrypted` (JSONB) — factory reads and decrypts on construction.
+
+Do not short-cut this by passing a `*gmail.Service` around. The whole point is that the rest of the app doesn't know or care which transport.
+
+## Public OAuth callback sits above the authenticated Mount
+
+Google (and any other OAuth provider) calls our redirect URL without our JWT. Those callback routes must live at a specific path registered BEFORE the authenticated `Mount("/outreach", ...)`. Chi's router matches specific routes before sub-trees, so a public `Get("/outreach/channels/gmail/callback", ...)` wins over the protected `Mount`.
+
+User identification inside a public callback uses the OAuth `state` parameter — store the state→userID mapping server-side (in-memory TTL store is fine for single-instance; move to Redis once multi-instance matters).
+
+Never, ever trust `state` without verifying it came from a state we issued. `channel/handler.go:stateStore` does this.
+
+## Secrets at rest: AES-256-GCM via platform/crypto
+
+OAuth tokens, SMTP credentials, and anything comparable go through `crypto.Cipher.Encrypt/Decrypt` before hitting the DB. Key comes from `TOKEN_ENCRYPTION_KEY` (32-byte base64) in production, derived from `SECRET_KEY` via SHA-256 in dev. Don't use `pgcrypto` or app-level base64 as a substitute.
+
+If the key rotates, old ciphertext becomes unreadable — users must re-authenticate. Acceptable for our scale.
+
 ## Anti-hallucination: NoHallucinationPreamble on every AI prompt
 
 Every AI system prompt is wrapped by `prompts.withPreamble()` which prepends `NoHallucinationPreamble` — a short block instructing the model to use only provided data, output "unknown" for missing fields, and include a `data_completeness` score (0.0–1.0) in the response.

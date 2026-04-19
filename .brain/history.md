@@ -5,6 +5,11 @@ updated: 2026-04-19
 
 # History
 
+## Outreach & CRM P1 foundation shipped
+
+**Date:** 2026-04-19
+Added the first slice of the CRM/outreach layer: a new top-level `internal/outreach/` module with channel-abstraction, contacts, sender profiles, and Gmail OAuth (auth URL + callback + encrypted token storage + send via Gmail API + inbox polling). Migrations 8-9 add `contacts`, `user_channels`, `sender_profiles`, `conversations`, `messages` tables. Channel interface is designed so WhatsApp/LinkedIn drop in without touching conversation/campaign code. Still TODO for P1: conversation service handlers, AI draft prompts, polling worker wiring, full frontend. See [[features/outreach.md]] and [[decisions.md#adopt-channel-interface-for-pluggable-messaging-transports]].
+
 ## Excel-only discovery redesign shipped
 
 **Date:** 2026-04-18

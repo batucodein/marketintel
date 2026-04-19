@@ -5,6 +5,70 @@ updated: 2026-04-19
 
 # Decisions
 
+## Adopt channel interface for pluggable messaging transports
+
+**Date:** 2026-04-19
+**Status:** Active
+**Context:** Outreach will start with Gmail, but product roadmap includes WhatsApp, Microsoft/Outlook, SMTP fallback, LinkedIn. If we bind the conversation/campaign/sequence code directly to Gmail APIs, every future channel becomes a refactor.
+**Alternatives considered:**
+- Gmail-only for V1, refactor later when needed (rejected — refactoring a live system with user data is expensive; better to pay the small abstraction tax upfront)
+- Use an off-the-shelf abstraction like Nylas (SaaS, adds dependency + cost + latency)
+- Channel interface + registry in our own code (chosen)
+**Result:** `internal/outreach/channel/interface.go` defines `Channel` (Type, CanSend, Send, ListNewMessages). `registry.go` maps channel-type strings to factories. Today only `gmail_oauth` is registered; adding WhatsApp is a new package that implements the interface and a single `DefaultRegistry.Register` call. Conversation/campaign/sequence code calls only `channel.Channel`, never touches Gmail directly.
+
+## One contact per (user, business) — CRM is contact-centric, not market-scoped
+
+**Date:** 2026-04-19
+**Status:** Active
+**Context:** A company often appears in multiple markets the user has uploaded (e.g., ACME imports marble AND granite AND travertine from 3 different Excels). If we key outreach to market-lead, the same company creates three separate lead "identities", three separate conversations, and a risk of double-outreach.
+**Alternatives considered:**
+- Market-scoped leads (simpler queries, bad UX — same company split across "cards")
+- Contact per (user, business) — one record across all markets (chosen — this is how every serious CRM works: HubSpot, Pipedrive, Salesforce)
+**Result:** `contacts` table has `UNIQUE (user_id, business_id)`. On "Email this lead" or add-to-campaign, we upsert the contact lazily. Markets still reference businesses in `business_markets`, unchanged. The outreach layer joins through contacts. Campaign wizard skips contacts already in active conversations by default with a warning.
+
+## Gmail OAuth only for V1 outreach — SMTP and Outlook deferred
+
+**Date:** 2026-04-19
+**Status:** Active
+**Context:** Need to pick an email transport to ship V1. Google Workspace + personal Gmail users are the biggest segment among Turkish B2B exporters; other providers (Outlook, Zoho, cPanel SMTP) add complexity.
+**Alternatives considered:**
+- Gmail + Outlook OAuth + SMTP fallback simultaneously (most coverage, ~2x work)
+- Transactional service (Resend/Postmark) — sends from our domain, requires DNS setup per user, less "personal" feel
+- Gmail OAuth only (chosen for V1)
+**Result:** `platform/oauth/gmail.go` + `outreach/channel/gmail/` package. Users not on Google Workspace can't use the tool in V1. Microsoft OAuth and SMTP fallback tracked as V2 tasks. Channel interface designed so adding them is ~1 day each.
+
+## Use Gmail API (users.messages.send), not SMTP relay
+
+**Date:** 2026-04-19
+**Status:** Active
+**Context:** Even with Gmail OAuth we could send via SMTP with the access token. But then sent messages would not appear in the user's Gmail Sent folder.
+**Alternatives considered:**
+- SMTP via Google's relay (simpler code, worse UX)
+- Gmail API users.messages.send (chosen)
+**Result:** When a user sends via our tool, the message appears in their real Gmail Sent folder. They see the same conversation in Gmail and in our inbox. If they reply in Gmail directly, our polling worker pulls it in. Seamless.
+
+## Gmail OAuth callback is a public route (not behind auth middleware)
+
+**Date:** 2026-04-19
+**Status:** Active
+**Context:** Google's redirect to our callback endpoint has no Authorization header — we can't require our JWT. But most of our API is behind `RequireAuth` middleware, including everything mounted under `/outreach`.
+**Alternatives considered:**
+- Move the callback to a completely different path like `/oauth-callbacks/gmail` (works but clutters the URL space)
+- Use two Mount points at `/outreach` (chi rejects overlapping mounts)
+- Register one specific `Get("/outreach/channels/gmail/callback", ...)` on the root router BEFORE the authenticated `Mount("/outreach", ...)` group (chosen)
+**Result:** In `server.go`, the callback route is registered publicly first; chi's trie matches the specific path before the Mount subtree, so the callback bypasses auth. User identification inside the callback uses the OAuth `state` parameter (short-lived in-memory CSRF store, TTL 10 min).
+
+## AES-256-GCM encryption for OAuth tokens at rest, derived from SECRET_KEY in dev
+
+**Date:** 2026-04-19
+**Status:** Active
+**Context:** OAuth refresh tokens give perpetual access to the user's Gmail — they must be encrypted at rest. But requiring a dedicated `TOKEN_ENCRYPTION_KEY` in local dev is friction.
+**Alternatives considered:**
+- Always require a separate key (safest, worst DX)
+- Store plaintext in dev (common lazy choice; leaks into accidental prod deploys)
+- Prefer explicit `TOKEN_ENCRYPTION_KEY`; if missing, derive from `SECRET_KEY` via SHA-256 (chosen)
+**Result:** `platform/crypto/aes.go` exposes `NewFromKeyOrSecret`. In production we set `TOKEN_ENCRYPTION_KEY=$(openssl rand -base64 32)`. In dev the key is deterministic from `SECRET_KEY`, so tokens remain readable across restarts but the mechanism is identical. Rotation story: if the key changes, existing tokens become unreadable and users must re-connect — acceptable for now.
+
 ## Collapse 4-stage discovery into Excel-only upload
 
 **Date:** 2026-04-18
