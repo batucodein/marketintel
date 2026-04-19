@@ -57,6 +57,14 @@ type Config struct {
 
 	// REST Countries
 	RESTCountriesBaseURL string `envconfig:"REST_COUNTRIES_BASE_URL" default:"https://restcountries.com/v3.1"`
+
+	// Gmail OAuth (outreach module)
+	GmailClientID        string `envconfig:"GMAIL_CLIENT_ID"`
+	GmailClientSecret    string `envconfig:"GMAIL_CLIENT_SECRET"`
+	GmailOAuthRedirectURL string `envconfig:"GMAIL_OAUTH_REDIRECT_URL" default:"http://localhost:8000/outreach/channels/gmail/callback"`
+	// AES-256 key (32 bytes base64-encoded) used to encrypt OAuth tokens at rest.
+	// Falls back to SecretKey-derived if unset in dev.
+	TokenEncryptionKey string `envconfig:"TOKEN_ENCRYPTION_KEY"`
 }
 
 // ParsedCORSOrigins returns CORS origins as a slice.

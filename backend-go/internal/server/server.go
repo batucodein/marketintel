@@ -11,6 +11,7 @@ import (
 	"github.com/batuhan/marketintel/internal/auth"
 	"github.com/batuhan/marketintel/internal/dashboard"
 	"github.com/batuhan/marketintel/internal/discovery"
+	"github.com/batuhan/marketintel/internal/outreach"
 	"github.com/batuhan/marketintel/internal/platform/middleware"
 	"github.com/batuhan/marketintel/internal/scoring"
 )
@@ -21,6 +22,7 @@ type Server struct {
 	discoveryHandler *discovery.Handler
 	scoringHandler   *scoring.Handler
 	dashboardHandler *dashboard.Handler
+	outreachHandler  *outreach.Handler
 	authMw           func(http.Handler) http.Handler
 }
 
@@ -31,6 +33,7 @@ func New(
 	discoveryHandler *discovery.Handler,
 	scoringHandler *scoring.Handler,
 	dashboardHandler *dashboard.Handler,
+	outreachHandler *outreach.Handler,
 	corsOrigins []string,
 ) *Server {
 	s := &Server{
@@ -39,6 +42,7 @@ func New(
 		discoveryHandler: discoveryHandler,
 		scoringHandler:   scoringHandler,
 		dashboardHandler: dashboardHandler,
+		outreachHandler:  outreachHandler,
 		authMw:           middleware.RequireAuth(jwtValidator, userFetcher),
 	}
 	s.setupMiddleware(corsOrigins)
@@ -71,6 +75,13 @@ func (s *Server) setupRoutes() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	// Public Gmail OAuth callback — must NOT be behind auth middleware because
+	// Google calls it directly. User identification is via the OAuth `state` parameter.
+	// Registered BEFORE the authenticated /outreach mount so this specific route wins.
+	if s.outreachHandler != nil {
+		s.router.Get("/outreach/channels/gmail/callback", s.outreachHandler.ChannelHandler().GmailCallback)
+	}
+
 	// Public auth routes (stricter rate limit: 10 attempts per minute per IP)
 	s.router.Route("/auth", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(10, time.Minute))
@@ -98,6 +109,9 @@ func (s *Server) setupRoutes() {
 		}
 		if s.dashboardHandler != nil {
 			r.Mount("/dashboard", s.dashboardHandler.Routes())
+		}
+		if s.outreachHandler != nil {
+			r.Mount("/outreach", s.outreachHandler.Routes())
 		}
 	})
 }

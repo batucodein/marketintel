@@ -20,9 +20,16 @@ import (
 	"github.com/batuhan/marketintel/internal/datasource"
 	"github.com/batuhan/marketintel/internal/discovery"
 	"github.com/batuhan/marketintel/internal/domain"
+	"github.com/batuhan/marketintel/internal/outreach"
+	outreachchannel "github.com/batuhan/marketintel/internal/outreach/channel"
+	gmailmailer "github.com/batuhan/marketintel/internal/outreach/channel/gmail"
+	outreachcontact "github.com/batuhan/marketintel/internal/outreach/contact"
+	outreachsender "github.com/batuhan/marketintel/internal/outreach/sender"
 	"github.com/batuhan/marketintel/internal/platform/ai"
 	"github.com/batuhan/marketintel/internal/platform/ailog"
+	"github.com/batuhan/marketintel/internal/platform/crypto"
 	"github.com/batuhan/marketintel/internal/platform/db"
+	"github.com/batuhan/marketintel/internal/platform/oauth"
 	"github.com/batuhan/marketintel/internal/scoring"
 	"github.com/batuhan/marketintel/internal/server"
 	"github.com/batuhan/marketintel/migrations"
@@ -147,8 +154,41 @@ func main() {
 	// Dashboard module
 	dashboardHandler := dashboard.NewHandler(pool, aiLogRepo)
 
+	// Outreach module (CRM + email)
+	tokenCipher, err := crypto.NewFromKeyOrSecret(cfg.TokenEncryptionKey, cfg.SecretKey)
+	if err != nil {
+		slog.Error("failed to init token cipher", "error", err)
+		os.Exit(1)
+	}
+	var gmailOAuth *oauth.GmailOAuth
+	if cfg.GmailClientID != "" && cfg.GmailClientSecret != "" {
+		gmailOAuth = oauth.NewGmailOAuth(cfg.GmailClientID, cfg.GmailClientSecret, cfg.GmailOAuthRedirectURL)
+		outreachchannel.DefaultRegistry.Register(domain.ChannelTypeGmailOAuth, gmailmailer.NewFactory(gmailOAuth, tokenCipher))
+		slog.Info("gmail oauth configured")
+	} else {
+		slog.Warn("gmail oauth not configured — set GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET to enable")
+	}
+
+	// CORS origins list is comma-or-json; take the first HTTP/HTTPS one for the
+	// post-OAuth redirect target. Fallback to localhost:3000.
+	frontendURL := "http://localhost:3000"
+	for _, o := range cfg.ParsedCORSOrigins() {
+		if strings.HasPrefix(o, "http") {
+			frontendURL = o
+			break
+		}
+	}
+
+	senderRepo := outreachsender.NewRepository(pool)
+	senderHandler := outreachsender.NewHandler(senderRepo)
+	contactRepo := outreachcontact.NewRepository(pool)
+	contactHandler := outreachcontact.NewHandler(contactRepo)
+	channelRepo := outreachchannel.NewRepository(pool)
+	channelHandler := outreachchannel.NewHandler(channelRepo, gmailOAuth, tokenCipher, frontendURL)
+	outreachHandler := outreach.NewHandler(senderHandler, contactHandler, channelHandler)
+
 	// Server
-	srv := server.New(jwtMgr, userFetcher, authHandler, discoveryHandler, scoringHandler, dashboardHandler, cfg.ParsedCORSOrigins())
+	srv := server.New(jwtMgr, userFetcher, authHandler, discoveryHandler, scoringHandler, dashboardHandler, outreachHandler, cfg.ParsedCORSOrigins())
 
 	httpSrv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
