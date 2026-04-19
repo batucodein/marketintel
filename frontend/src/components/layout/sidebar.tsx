@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { LayoutDashboard, Search, Globe, DollarSign, Settings } from "lucide-react";
+import { LayoutDashboard, Search, Globe, DollarSign, Settings, Mail } from "lucide-react";
 
 const NAV_ITEMS = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/discover", label: "Discovery", icon: Search },
   { href: "/markets", label: "Markets", icon: Globe },
+  { href: "/outreach", label: "Outreach", icon: Mail },
   { href: "/costs", label: "AI Costs", icon: DollarSign },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

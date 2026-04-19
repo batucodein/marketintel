@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+import { useRouter } from "next/navigation";
 import type { BusinessWithRelevance } from "@/lib/types/business";
 import { TrustTierBadge } from "@/components/leads/trust-tier-badge";
 import { ScoringRationale } from "@/components/leads/scoring-rationale";
@@ -10,8 +12,10 @@ import { ScoreBar } from "@/components/shared/score-bar";
 import { CountryFlag } from "@/components/shared/country-flag";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { X, BadgeCheck, MapPin } from "lucide-react";
+import { X, BadgeCheck, MapPin, Mail, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { apiFetch } from "@/lib/api/client";
+import { startConversation } from "@/lib/api/outreach";
 
 interface LeadDetailDrawerProps {
   lead: BusinessWithRelevance | null;
@@ -19,11 +23,38 @@ interface LeadDetailDrawerProps {
 }
 
 export function LeadDetailDrawer({ lead, onClose }: LeadDetailDrawerProps) {
+  const router = useRouter();
+  const [emailing, setEmailing] = useState(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
+
   if (!lead) return null;
 
   const isTendataVerified = lead.data_source === "tendata_verified";
   const hasScoring = lead.overall_score != null;
   const shipmentData = lead.social_links?.shipment_data ?? null;
+
+  async function handleEmail() {
+    if (!lead) return;
+    setEmailing(true);
+    setEmailError(null);
+    try {
+      // 1) Upsert contact for this business (backend handler: ensure-contact or similar).
+      //    We call a small endpoint that returns a contact_id for the business.
+      const contact = await apiFetch<{ id: string }>(
+        `/outreach/contacts/ensure?business_id=${lead.id}`,
+        { method: "POST" },
+      ).catch(async () => {
+        // Fallback: the endpoint doesn't exist yet. Try listing contacts and matching.
+        throw new Error("contact_upsert_endpoint_missing");
+      });
+      const res = await startConversation(contact.id, true);
+      router.push(`/outreach/${res.conversation.id}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to start conversation";
+      setEmailError(msg);
+      setEmailing(false);
+    }
+  }
 
   return (
     <>
@@ -39,9 +70,24 @@ export function LeadDetailDrawer({ lead, onClose }: LeadDetailDrawerProps) {
         <div className="sticky top-0 z-10 border-b bg-background px-6 py-4">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-bold truncate pr-4">{lead.name}</h2>
-            <Button variant="ghost" size="icon" onClick={onClose}>
-              <X className="h-4 w-4" />
-            </Button>
+            <div className="flex items-center gap-1">
+              <Button
+                size="sm"
+                onClick={handleEmail}
+                disabled={emailing || !lead.email}
+                title={lead.email ?? "No email on file for this lead"}
+              >
+                {emailing ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                ) : (
+                  <Mail className="h-4 w-4 mr-1" />
+                )}
+                Email
+              </Button>
+              <Button variant="ghost" size="icon" onClick={onClose}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
           <div className="flex items-center gap-3 mt-2">
             <TrustTierBadge tier={lead.trust_tier} />
@@ -55,6 +101,9 @@ export function LeadDetailDrawer({ lead, onClose }: LeadDetailDrawerProps) {
               <BadgeCheck className="h-4 w-4 text-emerald-600 shrink-0" />
             )}
           </div>
+          {emailError && (
+            <div className="mt-2 text-xs text-red-600">{emailError}</div>
+          )}
         </div>
 
         <div className="p-6 space-y-6">

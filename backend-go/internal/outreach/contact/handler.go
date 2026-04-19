@@ -22,9 +22,37 @@ func NewHandler(repo Repository) *Handler {
 func (h *Handler) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", h.List)
+	r.Post("/ensure", h.EnsureFromBusiness)
 	r.Get("/{contactID}", h.Get)
 	r.Patch("/{contactID}", h.Update)
 	return r
+}
+
+// EnsureFromBusiness upserts a contact for a (user, business) pair and returns it.
+// Called when the user clicks "Email this lead" in the markets UI.
+// Query: ?business_id=<uuid>
+func (h *Handler) EnsureFromBusiness(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	businessIDStr := r.URL.Query().Get("business_id")
+	if businessIDStr == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "business_id is required")
+		return
+	}
+	businessID, err := uuid.Parse(businessIDStr)
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid business_id")
+		return
+	}
+	c, err := h.repo.UpsertFromBusiness(r.Context(), user.ID, businessID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, c)
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
