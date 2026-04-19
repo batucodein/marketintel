@@ -69,15 +69,21 @@ Public (no auth):
 
 ## Timeline
 
-- **2026-04-19** — P1 backend complete: conversations, AI draft/reply prompts, Gmail inbox poller. End-to-end flow works. See [[history.md#outreach-p1-backend-complete-end-to-end-gmail-flow-works]].
+- **2026-04-19** — P1 frontend complete: sidebar Outreach entry, inbox, conversation chat view with AI-draft-reply, sender profile form, channels page with Gmail OAuth button, "Email" action in lead drawer. Ready for manual E2E test + cloud deploy.
+- **2026-04-19** — P1 backend complete: conversations, AI draft/reply prompts, Gmail inbox poller. See [[history.md#outreach-p1-backend-complete-end-to-end-gmail-flow-works]].
 - **2026-04-19** — P1 foundation: migrations, domain types, channel interface, Gmail OAuth plumbing, Gmail API send/fetch, sender profile, contact upsert. See [[history.md#outreach-crm-p1-foundation-shipped]].
 
 ## Current state
 
-**Backend: P1 complete.** Fully operational end-to-end. Gmail OAuth working both locally and on Cloud Run. The only thing blocking real usage is the frontend.
+**Backend + Frontend: P1 complete locally.** End-to-end flow works on localhost. Next step: redeploy Cloud Run image (backend has new /outreach routes that aren't in production yet, frontend has new /outreach pages).
 
-**Frontend: not started.** Needed to ship P1 to users: outreach layout (sub-sidebar), setup wizard page, sender profile form, connected channels page, inbox view, conversation chat view, "Email this lead" button on existing lead list page.
+Frontend routes shipped:
+- `/outreach` — inbox (unread-first, 30 s refresh)
+- `/outreach/[conversationId]` — chat view with AI-draft-reply + compose
+- `/outreach/contacts` — list + quick-email CTA
+- `/outreach/settings/profile` — sender profile form
+- `/outreach/settings/channels` — connect Gmail, list, set default
 
-**Blockers for end-to-end test (beyond the frontend):**
-- None for the logged-in user path — all backend endpoints return 200/202 on valid input.
-- For a UI-less test: use curl with a valid JWT to `POST /outreach/conversations` after connecting Gmail via `/outreach/channels/gmail/auth-url`.
+Known polish TODOs (not blocking):
+- First-run wizard (currently users navigate to Settings > Channels manually)
+- Redirect `/outreach` to settings when no channel is connected (currently just shows empty inbox)
