@@ -24,6 +24,8 @@ import (
 	outreachchannel "github.com/batuhan/marketintel/internal/outreach/channel"
 	gmailmailer "github.com/batuhan/marketintel/internal/outreach/channel/gmail"
 	outreachcontact "github.com/batuhan/marketintel/internal/outreach/contact"
+	outreachconv "github.com/batuhan/marketintel/internal/outreach/conversation"
+	outreachpoller "github.com/batuhan/marketintel/internal/outreach/poller"
 	outreachsender "github.com/batuhan/marketintel/internal/outreach/sender"
 	"github.com/batuhan/marketintel/internal/platform/ai"
 	"github.com/batuhan/marketintel/internal/platform/ailog"
@@ -185,7 +187,16 @@ func main() {
 	contactHandler := outreachcontact.NewHandler(contactRepo)
 	channelRepo := outreachchannel.NewRepository(pool)
 	channelHandler := outreachchannel.NewHandler(channelRepo, gmailOAuth, tokenCipher, frontendURL)
-	outreachHandler := outreach.NewHandler(senderHandler, contactHandler, channelHandler)
+	convRepo := outreachconv.NewRepository(pool)
+	convService := outreachconv.NewService(convRepo, channelRepo, contactRepo, senderRepo, outreachchannel.DefaultRegistry, aiRouter, pool)
+	convHandler := outreachconv.NewHandler(convRepo, convService)
+	outreachHandler := outreach.NewHandler(senderHandler, contactHandler, channelHandler, convHandler)
+
+	// Start the Gmail inbox poller in the background (2-minute interval).
+	// Scales with user_channels rows; quick to swap for webhook push later.
+	pollerCtx, pollerCancel := context.WithCancel(context.Background())
+	defer pollerCancel()
+	go outreachpoller.NewPoller(channelRepo, outreachchannel.DefaultRegistry, convRepo, contactRepo, pool, 2*time.Minute).Run(pollerCtx)
 
 	// Server
 	srv := server.New(jwtMgr, userFetcher, authHandler, discoveryHandler, scoringHandler, dashboardHandler, outreachHandler, cfg.ParsedCORSOrigins())

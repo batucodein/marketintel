@@ -33,10 +33,12 @@ type Router struct {
 // DefaultTasks returns the default task→provider mapping.
 func DefaultTasks() map[string]TaskConfig {
 	return map[string]TaskConfig{
-		"classification": {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.1, MaxTokens: 4096},
-		"scoring":        {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.2, MaxTokens: 4096},
-		"product_name":   {Provider: "azure_openai", Model: "gpt-5.4-nano", Temperature: 0.2, MaxTokens: 1024},
-		"crossmatch":     {Provider: "azure_openai", Model: "gpt-5.4-nano", Temperature: 0.0, MaxTokens: 2048},
+		"classification":  {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.1, MaxTokens: 4096},
+		"scoring":         {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.2, MaxTokens: 4096},
+		"product_name":    {Provider: "azure_openai", Model: "gpt-5.4-nano", Temperature: 0.2, MaxTokens: 1024},
+		"crossmatch":      {Provider: "azure_openai", Model: "gpt-5.4-nano", Temperature: 0.0, MaxTokens: 2048},
+		"outreach_draft":  {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.4, MaxTokens: 2048},
+		"outreach_reply":  {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.3, MaxTokens: 2048},
 	}
 }
 

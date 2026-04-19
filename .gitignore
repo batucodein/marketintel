@@ -44,3 +44,5 @@ htmlcov/
 
 # Alembic
 alembic/versions/__pycache__/
+backend-go/mi-server
+backend-go/server

@@ -7,17 +7,19 @@ import (
 
 	"github.com/batuhan/marketintel/internal/outreach/channel"
 	"github.com/batuhan/marketintel/internal/outreach/contact"
+	"github.com/batuhan/marketintel/internal/outreach/conversation"
 	"github.com/batuhan/marketintel/internal/outreach/sender"
 )
 
 type Handler struct {
-	sender  *sender.Handler
-	contact *contact.Handler
-	channel *channel.Handler
+	sender       *sender.Handler
+	contact      *contact.Handler
+	channel      *channel.Handler
+	conversation *conversation.Handler
 }
 
-func NewHandler(senderH *sender.Handler, contactH *contact.Handler, channelH *channel.Handler) *Handler {
-	return &Handler{sender: senderH, contact: contactH, channel: channelH}
+func NewHandler(senderH *sender.Handler, contactH *contact.Handler, channelH *channel.Handler, convH *conversation.Handler) *Handler {
+	return &Handler{sender: senderH, contact: contactH, channel: channelH, conversation: convH}
 }
 
 // ChannelHandler returns the inner channel handler so the server can register
@@ -30,6 +32,6 @@ func (h *Handler) Routes() chi.Router {
 	r.Mount("/sender-profile", h.sender.Routes())
 	r.Mount("/contacts", h.contact.Routes())
 	r.Mount("/channels", h.channel.Routes())
-	// conversations mounted in a later commit.
+	r.Mount("/conversations", h.conversation.Routes())
 	return r
 }
