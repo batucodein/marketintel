@@ -5,10 +5,15 @@ updated: 2026-04-19
 
 # History
 
+## Outreach P1 backend complete — end-to-end Gmail flow works
+
+**Date:** 2026-04-19
+Conversation service, AI draft/reply prompts, and Gmail inbox polling worker landed. Backend can now drive a full cycle: connect Gmail → start conversation with AI-drafted opener → send → poller picks up replies within 2 min → user requests AI-suggested reply → send reply (threaded). Pipeline stage transitions happen automatically (`lead` → `contacted` on first send, `contacted` → `replied` on incoming reply). Two new AI prompts: `outreach_draft` and `outreach_reply` with outreach-specific guardrails (no invented prices/dates, no false-intimacy phrases on first touch, deferrals instead of fabricated commitments). See [[features/outreach.md]].
+
 ## Outreach & CRM P1 foundation shipped
 
 **Date:** 2026-04-19
-Added the first slice of the CRM/outreach layer: a new top-level `internal/outreach/` module with channel-abstraction, contacts, sender profiles, and Gmail OAuth (auth URL + callback + encrypted token storage + send via Gmail API + inbox polling). Migrations 8-9 add `contacts`, `user_channels`, `sender_profiles`, `conversations`, `messages` tables. Channel interface is designed so WhatsApp/LinkedIn drop in without touching conversation/campaign code. Still TODO for P1: conversation service handlers, AI draft prompts, polling worker wiring, full frontend. See [[features/outreach.md]] and [[decisions.md#adopt-channel-interface-for-pluggable-messaging-transports]].
+Added the first slice of the CRM/outreach layer: a new top-level `internal/outreach/` module with channel-abstraction, contacts, sender profiles, and Gmail OAuth (auth URL + callback + encrypted token storage + send via Gmail API + inbox polling). Migrations 8-9 add `contacts`, `user_channels`, `sender_profiles`, `conversations`, `messages` tables. Channel interface is designed so WhatsApp/LinkedIn drop in without touching conversation/campaign code. See [[features/outreach.md]] and [[decisions.md#adopt-channel-interface-for-pluggable-messaging-transports]].
 
 ## Excel-only discovery redesign shipped
 

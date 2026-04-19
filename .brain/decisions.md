@@ -5,6 +5,28 @@ updated: 2026-04-19
 
 # Decisions
 
+## Outreach AI guardrails: no invented prices, no false-intimacy phrases, deferrals over fabrication
+
+**Date:** 2026-04-19
+**Status:** Active
+**Context:** Generic anti-hallucination preamble isn't enough for outreach. The model has a natural pull toward sounding impressive — it will invent prices, pretend there was a prior meeting, quote volumes that weren't in the data. Any of these shipped to a real prospect damages our user's reputation.
+**Alternatives considered:**
+- Rely on the shared `NoHallucinationPreamble` (too generic — doesn't catch outreach-specific pitfalls)
+- Require user to review every AI draft (we do — but the draft should not contain hallucinations in the first place)
+- Outreach-specific prompt rules + post-generation regex scan (chosen for V2 scan; V1 prompt rules alone)
+**Result:** `outreach_draft.go` and `outreach_reply.go` prompts enforce: (1) never include specific prices/discounts/numeric offers unless sender profile provided them; use "happy to share on request" style phrasing instead. (2) never imply a prior conversation — first touch is explicitly labeled. (3) for reply-time questions the AI can't answer from provided data, defer ("I'll send a rate sheet shortly") or ask clarifying questions. (4) `needs_user_input` field on replies lists any facts the user should verify before sending. Post-generation regex scan (reject-and-retry on matches like `$\d+`, "as we discussed") tracked for V2.
+
+## Inbox polling: matchbythreadId, drop stranger inbound messages for P1
+
+**Date:** 2026-04-19
+**Status:** Active
+**Context:** The Gmail inbox polling worker pulls all new messages every 2 minutes. Some of those are replies to our outbound; some are unrelated emails the user received from strangers.
+**Alternatives considered:**
+- Auto-create a contact + conversation for every inbound sender (adds clutter; most inbound is noise)
+- Drop anything we can't match to an existing conversation (chosen for P1)
+- Surface unmatched inbound in a separate "unassigned" queue (deferred to P4)
+**Result:** `poller.persistIncoming` only stores inbound messages whose Gmail `threadId` matches an existing conversation in our DB. Everything else is silently skipped. This keeps the inbox strictly focused on threads the user started through our tool. Tracked as a V2 concern: if the user proactively cold-emails from Gmail and the recipient replies, we won't pick it up.
+
 ## Adopt channel interface for pluggable messaging transports
 
 **Date:** 2026-04-19
