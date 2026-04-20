@@ -12,20 +12,61 @@ import { ScoreBar } from "@/components/shared/score-bar";
 import { CountryFlag } from "@/components/shared/country-flag";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { X, BadgeCheck, MapPin, Mail, Loader2 } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { X, BadgeCheck, MapPin, Mail, Loader2, Pencil, Save, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api/client";
 import { startConversation } from "@/lib/api/outreach";
+import { updateLead } from "@/lib/api/markets";
 
 interface LeadDetailDrawerProps {
   lead: BusinessWithRelevance | null;
+  marketId?: string;
   onClose: () => void;
+  onLeadUpdated?: (updated: BusinessWithRelevance) => void;
 }
 
-export function LeadDetailDrawer({ lead, onClose }: LeadDetailDrawerProps) {
+export function LeadDetailDrawer({ lead, marketId, onClose, onLeadUpdated }: LeadDetailDrawerProps) {
   const router = useRouter();
   const [emailing, setEmailing] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
+
+  // Inline edit state for contact info.
+  const [editing, setEditing] = useState(false);
+  const [editEmail, setEditEmail] = useState("");
+  const [editPhone, setEditPhone] = useState("");
+  const [editWebsite, setEditWebsite] = useState("");
+  const [savingContact, setSavingContact] = useState(false);
+  const [contactError, setContactError] = useState<string | null>(null);
+
+  function startEdit() {
+    if (!lead) return;
+    setEditEmail(lead.email ?? "");
+    setEditPhone(lead.phone ?? "");
+    setEditWebsite(lead.website ?? "");
+    setEditing(true);
+    setContactError(null);
+  }
+
+  async function saveContact() {
+    if (!lead || !marketId) return;
+    setSavingContact(true);
+    setContactError(null);
+    try {
+      await updateLead(marketId, lead.id, {
+        email: editEmail,
+        phone: editPhone,
+        website: editWebsite,
+      });
+      const updated = { ...lead, email: editEmail || null, phone: editPhone || null, website: editWebsite || null };
+      onLeadUpdated?.(updated as BusinessWithRelevance);
+      setEditing(false);
+    } catch (e) {
+      setContactError(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setSavingContact(false);
+    }
+  }
 
   if (!lead) return null;
 
@@ -107,6 +148,72 @@ export function LeadDetailDrawer({ lead, onClose }: LeadDetailDrawerProps) {
         </div>
 
         <div className="p-6 space-y-6">
+          {/* Contact info — editable */}
+          <Section title="Contact Info">
+            {!editing ? (
+              <div className="space-y-1 text-sm">
+                <div className="grid grid-cols-[80px_1fr_auto] items-center gap-2">
+                  <span className="text-xs text-muted-foreground">Email</span>
+                  <span className="font-mono truncate">{lead.email ?? <em className="text-muted-foreground">not set</em>}</span>
+                  {marketId && (
+                    <Button variant="ghost" size="icon" onClick={startEdit} title="Edit contact info">
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
+                </div>
+                <div className="grid grid-cols-[80px_1fr_auto] items-center gap-2">
+                  <span className="text-xs text-muted-foreground">Phone</span>
+                  <span className="font-mono truncate">{lead.phone ?? <em className="text-muted-foreground">not set</em>}</span>
+                  <span></span>
+                </div>
+                <div className="grid grid-cols-[80px_1fr_auto] items-center gap-2">
+                  <span className="text-xs text-muted-foreground">Website</span>
+                  <span className="font-mono truncate">{lead.website ?? <em className="text-muted-foreground">not set</em>}</span>
+                  <span></span>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2 text-sm">
+                <div>
+                  <label className="text-xs text-muted-foreground block mb-0.5">Email</label>
+                  <Input
+                    value={editEmail}
+                    onChange={(e) => setEditEmail(e.target.value)}
+                    placeholder="name@company.com"
+                    type="email"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground block mb-0.5">Phone</label>
+                  <Input
+                    value={editPhone}
+                    onChange={(e) => setEditPhone(e.target.value)}
+                    placeholder="+1 555 123 4567"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground block mb-0.5">Website</label>
+                  <Input
+                    value={editWebsite}
+                    onChange={(e) => setEditWebsite(e.target.value)}
+                    placeholder="https://example.com"
+                  />
+                </div>
+                {contactError && <p className="text-xs text-red-600">{contactError}</p>}
+                <div className="flex gap-2 pt-1">
+                  <Button size="sm" onClick={saveContact} disabled={savingContact}>
+                    {savingContact ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> : <Save className="h-3.5 w-3.5 mr-1" />}
+                    Save
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setEditing(false)} disabled={savingContact}>
+                    <XCircle className="h-3.5 w-3.5 mr-1" />
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
+          </Section>
+
           {/* AI Scoring */}
           {hasScoring && (
             <Section title="AI Scoring">

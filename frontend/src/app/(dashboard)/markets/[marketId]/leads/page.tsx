@@ -27,7 +27,7 @@ export default function MarketLeadsPage() {
     () => getMarket(marketId),
   );
 
-  const { data, error } = useSWR(
+  const { data, error, mutate } = useSWR(
     `/markets/${marketId}/leads?page=${page}&page_size=${PAGE_SIZE}&min_score=${minScore}`,
     () => getMarketLeads(marketId, page, PAGE_SIZE, minScore),
   );
@@ -105,7 +105,12 @@ export default function MarketLeadsPage() {
 
       <LeadDetailDrawer
         lead={selectedLead}
+        marketId={marketId}
         onClose={() => setSelectedLead(null)}
+        onLeadUpdated={(updated) => {
+          setSelectedLead(updated);
+          mutate();
+        }}
       />
     </div>
   );

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -32,6 +33,9 @@ type Repository interface {
 
 	// Leads
 	ListLeads(ctx context.Context, marketID, userID uuid.UUID, minScore, page, pageSize int) ([]domain.BusinessWithRelevance, int, error)
+
+	// Manual contact edits on a business (user fixes an email/phone scraper missed).
+	UpdateBusinessContact(ctx context.Context, businessID uuid.UUID, email, phone, website *string) error
 }
 
 type repository struct {
@@ -135,6 +139,45 @@ func (r *repository) DeleteMarket(ctx context.Context, id uuid.UUID) error {
 	}
 
 	return tx.Commit(ctx)
+}
+
+// UpdateBusinessContact lets the user manually fix email/phone/website on a
+// business when the scraper missed them. Passing nil keeps existing value;
+// passing pointer-to-empty-string clears the field.
+func (r *repository) UpdateBusinessContact(ctx context.Context, businessID uuid.UUID, email, phone, website *string) error {
+	sets := []string{}
+	args := []any{}
+	idx := 1
+	if email != nil {
+		sets = append(sets, fmt.Sprintf("email = $%d", idx))
+		args = append(args, nullIfEmpty(*email))
+		idx++
+	}
+	if phone != nil {
+		sets = append(sets, fmt.Sprintf("phone = $%d", idx))
+		args = append(args, nullIfEmpty(*phone))
+		idx++
+	}
+	if website != nil {
+		sets = append(sets, fmt.Sprintf("website = $%d", idx))
+		args = append(args, nullIfEmpty(*website))
+		idx++
+	}
+	if len(sets) == 0 {
+		return nil
+	}
+	sets = append(sets, "updated_at = now()")
+	args = append(args, businessID)
+	q := fmt.Sprintf("UPDATE businesses SET %s WHERE id = $%d", strings.Join(sets, ", "), idx)
+	_, err := r.pool.Exec(ctx, q, args...)
+	return err
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func (r *repository) UpsertRanking(ctx context.Context, rk *domain.MarketRanking) error {

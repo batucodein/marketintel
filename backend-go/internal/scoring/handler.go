@@ -34,6 +34,7 @@ func (h *Handler) MarketRoutes() chi.Router {
 	r.Get("/{marketID}", h.GetMarket)
 	r.Delete("/{marketID}", h.DeleteMarket)
 	r.Get("/{marketID}/leads", h.GetLeads)
+	r.Patch("/{marketID}/leads/{businessID}", h.UpdateLead)
 	return r
 }
 
@@ -78,6 +79,42 @@ func (h *Handler) DeleteMarket(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.repo.DeleteMarket(r.Context(), id); err != nil {
 		httputil.WriteError(w, http.StatusInternalServerError, "failed to delete market")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// UpdateLead lets the user manually correct contact info on a lead
+// (email/phone/website) when scraping missed or got them wrong.
+// PATCH /markets/{marketID}/leads/{businessID}
+type updateLeadRequest struct {
+	Email   *string `json:"email,omitempty"`
+	Phone   *string `json:"phone,omitempty"`
+	Website *string `json:"website,omitempty"`
+}
+
+func (h *Handler) UpdateLead(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	businessID, err := uuid.Parse(chi.URLParam(r, "businessID"))
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid business ID")
+		return
+	}
+	var req updateLeadRequest
+	if err := httputil.DecodeJSON(r, &req); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if req.Email == nil && req.Phone == nil && req.Website == nil {
+		httputil.WriteError(w, http.StatusBadRequest, "nothing to update")
+		return
+	}
+	if err := h.repo.UpdateBusinessContact(r.Context(), businessID, req.Email, req.Phone, req.Website); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to update lead")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

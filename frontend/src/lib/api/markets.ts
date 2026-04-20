@@ -30,3 +30,15 @@ export function getMarketLeads(
     `/markets/${marketId}/leads?page=${page}&page_size=${pageSize}&min_score=${minScore}`,
   );
 }
+
+// Manually edit contact info on a lead (email/phone/website).
+export function updateLead(
+  marketId: string,
+  businessId: string,
+  fields: { email?: string; phone?: string; website?: string },
+): Promise<void> {
+  return apiFetch(`/markets/${marketId}/leads/${businessId}`, {
+    method: "PATCH",
+    body: JSON.stringify(fields),
+  });
+}
