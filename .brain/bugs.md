@@ -5,6 +5,14 @@ updated: 2026-04-20
 
 # Bugs
 
+## AI draft save failed — ai_prompt_version varchar(16) too tight
+
+**Date:** 2026-04-20
+**Symptom:** Clicking "Email" on a lead AI-drafted a message but persisting it returned `ERROR: value too long for type character varying(16) (SQLSTATE 22001)`.
+**Root cause:** `messages.ai_prompt_version` is `VARCHAR(16)` (migration 9), but the service writes `"outreach_draft_v1"` / `"outreach_reply_v1"` — both 17 characters.
+**Fix:** Migration 10 bumped the column to `VARCHAR(64)`.
+**Lesson:** Second instance of the varchar-too-tight pattern after the country-code `UNKNOWN` overflow (bugs below). Whenever code writes a constant string into a varchar column, grep for the column width before shipping. Better: default to `VARCHAR(64)` or `TEXT` for identifier-ish fields that don't benefit from a tight bound.
+
 ## Inline contact edit failed with "Load failed" — CORS missing PATCH
 
 **Date:** 2026-04-20
