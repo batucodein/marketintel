@@ -1,9 +1,36 @@
 ---
 type: decisions
-updated: 2026-04-19
+updated: 2026-04-20
 ---
 
 # Decisions
+
+## One active conversation per (user, contact) — Email button is idempotent
+
+**Date:** 2026-04-20
+**Status:** Active
+**Context:** Clicking "Email" on the same lead repeatedly kept creating new conversations. User was left with 3 "OZALHAN ARCHITECTURE" rows in the inbox for one relationship.
+**Alternatives considered:**
+- Always create new (current; cluttered)
+- Merge everything into a single thread per contact forever (wrong — a thread that got a reply and was closed should stay closed; new outreach = new thread)
+- Reuse the most recent ACTIVE conversation; create new only if none or all are closed (chosen)
+**Result:** `Repository.FindActiveByContact` returns the latest `status='active'` conversation. `StartFromContact` calls this first and returns `{conversation, already_existed: true}` if found. The frontend redirects to the same URL either way, so "click twice, land on same page." Manual cleanup via new DELETE endpoint + trash button on inbox rows.
+
+## State-aware AI drafting: inspect conversation before picking prompt
+
+**Date:** 2026-04-20
+**Status:** Active
+**Context:** Clicking "AI draft" in the chat view was calling the reply prompt regardless of conversation state. On empty conversations (no inbound yet) the model hallucinated phrases like "thanks for your note" because the prompt framed the ask as "reply to the most recent inbound message." On conversations where the user had already sent and gotten no reply, the same reply prompt didn't know it should write a non-pushy follow-up.
+**Alternatives considered:**
+- Add conditional branches inside one mega-prompt (too long; model loses track)
+- Split into three prompts and dispatch by state (cleaner; chosen)
+- Ask the user to pick "initial / reply / follow-up" manually (bad UX)
+**Result:** `DraftReply` now inspects the conversation's actual sent/received messages (pending drafts excluded) and routes:
+- 0 real messages → `outreach_draft` (cold initial)
+- last is inbound → `outreach_reply` with mode=reply
+- last is outbound → `outreach_reply` with mode=followup (instruction: add value, don't just bump)
+
+Also: AI context now includes the lead score breakdown (overall + five dimensions + rationale + recommended_approach) so the model can cite specific buyer signals instead of writing generic copy. And before generating, `DeletePendingDrafts` clears any stale `pending_approval` message so repeat clicks don't accumulate duplicates.
 
 ## Outreach AI guardrails: no invented prices, no false-intimacy phrases, deferrals over fabrication
 
