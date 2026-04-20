@@ -59,7 +59,7 @@ func (s *Server) setupMiddleware(corsOrigins []string) {
 	s.router.Use(middleware.RequestLogging)
 	s.router.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   corsOrigins,
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: true,
