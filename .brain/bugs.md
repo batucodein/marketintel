@@ -1,9 +1,17 @@
 ---
 type: bugs
-updated: 2026-04-19
+updated: 2026-04-20
 ---
 
 # Bugs
+
+## Inline contact edit failed with "Load failed" — CORS missing PATCH
+
+**Date:** 2026-04-20
+**Symptom:** After adding the manual contact-info edit feature on the lead drawer, clicking Save showed "Load failed" in the UI. `PATCH /markets/{id}/leads/{businessID}` never reached the backend.
+**Root cause:** The global CORS middleware in `internal/server/server.go` had `AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}` — no `PATCH`. The browser's preflight OPTIONS returned 200 but without `Access-Control-Allow-Methods` containing PATCH, so the browser aborted the actual PATCH request. The frontend fetch error surfaced as a generic "Load failed" because it happened before any response came back.
+**Fix:** Added `"PATCH"` to the `AllowedMethods` list.
+**Lesson:** Any time a new HTTP verb is added to a route in this repo, update the global CORS `AllowedMethods` list in `server.go`. Frontend errors that read "Load failed" or "Failed to fetch" with no HTTP status are almost always CORS preflight failures — check the Network tab for an OPTIONS request without the expected `Allow-*` headers before debugging anything else.
 
 ## UNKNOWN country fallback overflowed varchar(3)
 
