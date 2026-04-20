@@ -26,10 +26,29 @@ func (h *Handler) Routes() chi.Router {
 	r.Post("/", h.Start)
 	r.Get("/{id}", h.Get)
 	r.Patch("/{id}", h.Update)
+	r.Delete("/{id}", h.Delete)
 	r.Post("/{id}/read", h.MarkRead)
 	r.Post("/{id}/messages", h.SendMessage)
 	r.Post("/{id}/draft", h.DraftReply)
 	return r
+}
+
+func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := h.repo.Delete(r.Context(), user.ID, id); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to delete")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // List returns the inbox.

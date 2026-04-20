@@ -18,16 +18,19 @@ type Repository interface {
 	Create(ctx context.Context, c domain.Conversation) (*domain.Conversation, error)
 	Get(ctx context.Context, userID, id uuid.UUID) (*domain.Conversation, error)
 	GetByThread(ctx context.Context, channelID uuid.UUID, threadID string) (*domain.Conversation, error)
+	FindActiveByContact(ctx context.Context, userID, contactID uuid.UUID) (*domain.Conversation, error)
 	ListInbox(ctx context.Context, userID uuid.UUID, unreadOnly bool, limit, offset int) ([]ConversationListRow, int, error)
 	UpdateLast(ctx context.Context, id uuid.UUID, direction string, at time.Time, unread bool) error
 	UpdateStatus(ctx context.Context, userID, id uuid.UUID, status string) error
 	UpdateAutomation(ctx context.Context, userID, id uuid.UUID, automation string) error
 	MarkRead(ctx context.Context, userID, id uuid.UUID) error
+	Delete(ctx context.Context, userID, id uuid.UUID) error
 
 	// Message ops
 	CreateMessage(ctx context.Context, m domain.Message) (*domain.Message, error)
 	ListMessages(ctx context.Context, conversationID uuid.UUID) ([]domain.Message, error)
 	FindByExternalID(ctx context.Context, externalID string) (*domain.Message, error)
+	DeletePendingDrafts(ctx context.Context, conversationID uuid.UUID) error
 }
 
 // ConversationListRow is a row in the inbox list — joined with contact + business for display.
@@ -187,6 +190,40 @@ func (r *repository) MarkRead(ctx context.Context, userID, id uuid.UUID) error {
 	_, err := r.pool.Exec(ctx,
 		`UPDATE conversations SET unread = false, updated_at = now() WHERE user_id = $1 AND id = $2`,
 		userID, id,
+	)
+	return err
+}
+
+// FindActiveByContact returns the most recently active conversation for a contact,
+// or ErrNotFound if none exists in status=active.
+func (r *repository) FindActiveByContact(ctx context.Context, userID, contactID uuid.UUID) (*domain.Conversation, error) {
+	return r.scanOne(ctx,
+		`SELECT id, user_id, contact_id, channel_id, campaign_id, channel_type,
+		        subject, external_thread_id, automation, status,
+		        last_message_at, last_direction, unread, created_at, updated_at
+		 FROM conversations
+		 WHERE user_id = $1 AND contact_id = $2 AND status = 'active'
+		 ORDER BY COALESCE(last_message_at, created_at) DESC
+		 LIMIT 1`,
+		userID, contactID,
+	)
+}
+
+func (r *repository) Delete(ctx context.Context, userID, id uuid.UUID) error {
+	_, err := r.pool.Exec(ctx,
+		`DELETE FROM conversations WHERE user_id = $1 AND id = $2`,
+		userID, id,
+	)
+	return err
+}
+
+// DeletePendingDrafts removes any messages with status='pending_approval'
+// in a conversation. Called before regenerating an AI draft so we don't
+// leave stale drafts hanging around.
+func (r *repository) DeletePendingDrafts(ctx context.Context, conversationID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx,
+		`DELETE FROM messages WHERE conversation_id = $1 AND status = 'pending_approval'`,
+		conversationID,
 	)
 	return err
 }

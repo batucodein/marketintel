@@ -25,22 +25,35 @@ const outreachReplySystem = `You are drafting a suggested reply to an inbound em
   "confidence": 0.0-1.0
 }`
 
-const outreachReplyTemplate = `## Sender profile
+const outreachReplyTemplate = `## Task mode
+%s
+
+## Sender profile
 %s
 
 ## Contact + business
 %s
 
-## Full conversation (oldest first)
+## Lead score (our system's analysis)
 %s
 
-Draft a reply to the most recent inbound message. Return JSON only.`
+## Full conversation (oldest first; YOU = outbound, THEM = inbound)
+%s
+
+%s
+
+Return JSON only.`
 
 type OutreachReplyInput struct {
+	// Mode: "reply" | "followup"
+	// - reply: respond to the most recent inbound message from the recipient
+	// - followup: gentle non-pushy bump when the last outbound got no reply
+	Mode              string
 	SenderProfileJSON string
 	ContactJSON       string
 	BusinessJSON      string
-	ConversationText  string // rendered transcript with DIR/subject/body per message
+	LeadScoreJSON     string // optional; "(not scored)" if absent
+	ConversationText  string
 }
 
 type OutreachReplyResult struct {
@@ -55,9 +68,21 @@ type OutreachReplyPrompt struct {
 }
 
 func BuildOutreachReplyPrompt(in OutreachReplyInput) OutreachReplyPrompt {
+	mode := in.Mode
+	if mode == "" {
+		mode = "reply"
+	}
+	instruction := "Draft a reply to the most recent inbound message. Use the conversation history so you don't repeat what you already said."
+	if mode == "followup" {
+		instruction = "The recipient has not replied. Draft a gentle, non-pushy follow-up that adds value (a new angle, a question, a relevant offer) — do NOT simply bump the thread with 'any thoughts?'. Keep it short."
+	}
 	contact := fmt.Sprintf("%s\n\nBusiness:\n%s", in.ContactJSON, in.BusinessJSON)
+	leadScore := in.LeadScoreJSON
+	if leadScore == "" {
+		leadScore = "(not scored)"
+	}
 	return OutreachReplyPrompt{
 		System: withPreamble(outreachReplySystem),
-		Prompt: fmt.Sprintf(outreachReplyTemplate, in.SenderProfileJSON, contact, in.ConversationText),
+		Prompt: fmt.Sprintf(outreachReplyTemplate, mode, in.SenderProfileJSON, contact, leadScore, in.ConversationText, instruction),
 	}
 }

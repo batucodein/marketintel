@@ -1,18 +1,36 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { listConversations } from "@/lib/api/outreach";
-import { Inbox as InboxIcon, Loader2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { listConversations, deleteConversation } from "@/lib/api/outreach";
+import { Inbox as InboxIcon, Loader2, Trash2 } from "lucide-react";
 
 export default function OutreachInboxPage() {
-  const { data, isLoading } = useSWR(
+  const { data, isLoading, mutate } = useSWR(
     "/outreach/conversations",
     () => listConversations(false, 1, 50),
-    { refreshInterval: 30000 }, // refresh every 30s for new replies
+    { refreshInterval: 30000 },
   );
+  const [deletingID, setDeletingID] = useState<string | null>(null);
+
+  async function handleDelete(e: React.MouseEvent, id: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!confirm("Delete this conversation? The email thread on Gmail is not affected.")) return;
+    setDeletingID(id);
+    try {
+      await deleteConversation(id);
+      mutate();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to delete");
+    } finally {
+      setDeletingID(null);
+    }
+  }
 
   if (isLoading) {
     return (
@@ -42,50 +60,66 @@ export default function OutreachInboxPage() {
       {convs.map((c) => {
         const last = c.last_message_at ? new Date(c.last_message_at) : null;
         return (
-          <Link key={c.id} href={`/outreach/${c.id}`}>
-            <Card
-              className={
-                "p-3 hover:border-blue-300 hover:shadow-sm transition cursor-pointer " +
-                (c.unread ? "border-l-4 border-l-blue-600" : "")
-              }
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className={"text-sm " + (c.unread ? "font-semibold" : "font-medium")}>
-                      {c.contact_name}
-                    </span>
-                    <span className="text-xs text-muted-foreground truncate">
-                      {c.business_name}
-                    </span>
-                    {c.unread && <Badge className="text-[10px]">New</Badge>}
+          <div key={c.id} className="group relative">
+            <Link href={`/outreach/${c.id}`}>
+              <Card
+                className={
+                  "p-3 pr-10 hover:border-blue-300 hover:shadow-sm transition cursor-pointer " +
+                  (c.unread ? "border-l-4 border-l-blue-600" : "")
+                }
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className={"text-sm " + (c.unread ? "font-semibold" : "font-medium")}>
+                        {c.contact_name}
+                      </span>
+                      <span className="text-xs text-muted-foreground truncate">
+                        {c.business_name}
+                      </span>
+                      {c.unread && <Badge className="text-[10px]">New</Badge>}
+                    </div>
+                    {c.subject && (
+                      <div className="text-xs text-muted-foreground mt-0.5 truncate">
+                        {c.subject}
+                      </div>
+                    )}
+                    {c.last_message_snippet && (
+                      <div className="text-xs text-muted-foreground mt-1 truncate">
+                        {c.last_direction === "out" ? "You: " : ""}
+                        {c.last_message_snippet}
+                      </div>
+                    )}
                   </div>
-                  {c.subject && (
-                    <div className="text-xs text-muted-foreground mt-0.5 truncate">
-                      {c.subject}
-                    </div>
-                  )}
-                  {c.last_message_snippet && (
-                    <div className="text-xs text-muted-foreground mt-1 truncate">
-                      {c.last_direction === "out" ? "You: " : ""}
-                      {c.last_message_snippet}
-                    </div>
-                  )}
+                  <div className="text-[11px] text-muted-foreground shrink-0 text-right">
+                    {last && last.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+                    {last && (
+                      <div>
+                        {last.toLocaleTimeString(undefined, {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="text-[11px] text-muted-foreground shrink-0 text-right">
-                  {last && last.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
-                  {last && (
-                    <div>
-                      {last.toLocaleTimeString(undefined, {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </Card>
-          </Link>
+              </Card>
+            </Link>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition text-muted-foreground hover:text-red-600 h-7 w-7"
+              onClick={(e) => handleDelete(e, c.id)}
+              disabled={deletingID === c.id}
+              title="Delete conversation"
+            >
+              {deletingID === c.id ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          </div>
         );
       })}
     </div>

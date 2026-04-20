@@ -98,6 +98,10 @@ export function markConversationRead(id: string): Promise<void> {
   return apiFetch(`/outreach/conversations/${id}/read`, { method: "POST" });
 }
 
+export function deleteConversation(id: string): Promise<void> {
+  return apiFetch(`/outreach/conversations/${id}`, { method: "DELETE" });
+}
+
 export function updateConversation(
   id: string,
   fields: { status?: string; automation?: string },

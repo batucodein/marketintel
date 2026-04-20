@@ -46,9 +46,9 @@ func NewService(
 	}
 }
 
-// StartFromContact creates a new conversation on the user's default Gmail channel
-// for a given contact and optionally AI-drafts the opening message.
-// Returns the conversation + the draft message (status=draft, not yet sent).
+// StartFromContact returns an existing active conversation for the contact if
+// one exists (click-twice idempotency), otherwise creates a new one and
+// optionally AI-drafts the opening message.
 func (s *Service) StartFromContact(ctx context.Context, userID, contactID uuid.UUID, draftWithAI bool) (*StartResult, error) {
 	c, err := s.contacts.Get(ctx, userID, contactID)
 	if err != nil {
@@ -56,6 +56,11 @@ func (s *Service) StartFromContact(ctx context.Context, userID, contactID uuid.U
 	}
 	if c.PrimaryEmail == nil || *c.PrimaryEmail == "" {
 		return nil, errors.New("contact has no primary email")
+	}
+
+	// Reuse existing active conversation if one exists.
+	if existing, err := s.repo.FindActiveByContact(ctx, userID, contactID); err == nil && existing != nil {
+		return &StartResult{Conversation: *existing, AlreadyExisted: true}, nil
 	}
 
 	// Pick the default channel.
@@ -78,7 +83,6 @@ func (s *Service) StartFromContact(ctx context.Context, userID, contactID uuid.U
 		return nil, errors.New("no gmail channel connected — connect one under Settings → Channels")
 	}
 
-	// Create the conversation shell.
 	conv, err := s.repo.Create(ctx, domain.Conversation{
 		UserID:      userID,
 		ContactID:   contactID,
@@ -96,11 +100,9 @@ func (s *Service) StartFromContact(ctx context.Context, userID, contactID uuid.U
 	if draftWithAI {
 		draft, err := s.draftInitial(ctx, userID, c)
 		if err != nil {
-			// Don't fail the whole request — the conversation exists, user can write manually.
 			result.DraftError = err.Error()
 			return result, nil
 		}
-		// Save as a pending-approval message.
 		subject := draft.Subject
 		body := draft.Body
 		promptV := "outreach_draft_v1"
@@ -124,9 +126,10 @@ func (s *Service) StartFromContact(ctx context.Context, userID, contactID uuid.U
 }
 
 type StartResult struct {
-	Conversation domain.Conversation `json:"conversation"`
-	DraftMessage *domain.Message     `json:"draft_message,omitempty"`
-	DraftError   string              `json:"draft_error,omitempty"`
+	Conversation   domain.Conversation `json:"conversation"`
+	DraftMessage   *domain.Message     `json:"draft_message,omitempty"`
+	DraftError     string              `json:"draft_error,omitempty"`
+	AlreadyExisted bool                `json:"already_existed,omitempty"`
 }
 
 // SendMessage sends a message through the conversation's channel.
@@ -291,12 +294,21 @@ type SendMessageRequest struct {
 	Body           string     `json:"body,omitempty"`
 }
 
-// DraftReply asks the AI to suggest a reply to the latest inbound message.
-// Saves a pending_approval message and returns it.
+// DraftReply is now state-aware — it inspects the conversation and picks the
+// right prompt:
+//   - no sent/received messages yet → outreach_draft (cold initial)
+//   - last real message is inbound → outreach_reply (mode=reply)
+//   - last real message is outbound → outreach_reply (mode=followup)
+//
+// Before generating, it wipes any stale pending_approval draft so we don't
+// accumulate half-written AI messages.
 func (s *Service) DraftReply(ctx context.Context, userID, conversationID uuid.UUID) (*domain.Message, error) {
 	conv, err := s.repo.Get(ctx, userID, conversationID)
 	if err != nil {
 		return nil, err
+	}
+	if err := s.repo.DeletePendingDrafts(ctx, conv.ID); err != nil {
+		return nil, fmt.Errorf("cleanup old drafts: %w", err)
 	}
 	msgs, err := s.repo.ListMessages(ctx, conv.ID)
 	if err != nil {
@@ -311,11 +323,93 @@ func (s *Service) DraftReply(ctx context.Context, userID, conversationID uuid.UU
 	if sp == nil {
 		sp = &domain.SenderProfile{UserID: userID, Tone: "formal"}
 	}
-	business := s.loadBusinessJSON(ctx, c.BusinessID)
+	businessJSON := s.loadBusinessJSON(ctx, c.BusinessID)
+	shipmentCtx, _ := s.loadShipmentContext(ctx, c.BusinessID)
+	leadScoreJSON := s.loadLeadScoreJSON(ctx, userID, c.BusinessID)
 
-	// Render transcript.
-	var tb strings.Builder
+	// Only count real sent/received messages (skip drafts).
+	sentMsgs := make([]domain.Message, 0, len(msgs))
 	for _, m := range msgs {
+		if m.Status != domain.MessageStatusPendingApproval && m.Status != domain.MessageStatusDraft {
+			sentMsgs = append(sentMsgs, m)
+		}
+	}
+
+	// State: initial (no real messages), reply (last is inbound), followup (last is outbound).
+	state := "initial"
+	if len(sentMsgs) > 0 {
+		last := sentMsgs[len(sentMsgs)-1]
+		if last.Direction == domain.DirectionInbound {
+			state = "reply"
+		} else {
+			state = "followup"
+		}
+	}
+
+	switch state {
+	case "initial":
+		return s.draftInitialMessage(ctx, userID, conv, c, sp, businessJSON, shipmentCtx, leadScoreJSON)
+	default:
+		return s.draftReplyOrFollowup(ctx, userID, conv, c, sp, businessJSON, leadScoreJSON, sentMsgs, state)
+	}
+}
+
+// draftInitialMessage is the "first cold email" path — used when the user
+// clicks AI draft on an empty conversation.
+func (s *Service) draftInitialMessage(
+	ctx context.Context,
+	userID uuid.UUID,
+	conv *domain.Conversation,
+	c *domain.Contact,
+	sp *domain.SenderProfile,
+	businessJSON, shipmentCtx, leadScoreJSON string,
+) (*domain.Message, error) {
+	prompt := prompts.BuildOutreachDraftPrompt(prompts.OutreachDraftInput{
+		SenderProfileJSON: prompts.EncodeJSON(sp),
+		ContactJSON:       prompts.EncodeJSON(c),
+		BusinessJSON:      businessJSON,
+		ShipmentContext:   shipmentCtx,
+		LeadScoreJSON:     leadScoreJSON,
+	})
+	ctxAI := ai.WithUserID(ctx, userID)
+	raw, _, err := s.ai.CompleteJSON(ctxAI, "outreach_draft", prompt.Prompt, prompt.System, 30*time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("ai draft: %w", err)
+	}
+	var out prompts.OutreachDraftResult
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("parse ai draft: %w", err)
+	}
+	if out.Body == "" || out.Subject == "" {
+		return nil, errors.New("ai returned empty subject/body")
+	}
+	promptV := "outreach_draft_v1"
+	return s.repo.CreateMessage(ctx, domain.Message{
+		ConversationID:  conv.ID,
+		Direction:       domain.DirectionOutbound,
+		ChannelType:     conv.ChannelType,
+		Subject:         &out.Subject,
+		BodyText:        &out.Body,
+		AIGenerated:     true,
+		AIPromptVersion: &promptV,
+		Status:          domain.MessageStatusPendingApproval,
+	})
+}
+
+// draftReplyOrFollowup handles both the reply and followup states using the
+// same prompt with different modes.
+func (s *Service) draftReplyOrFollowup(
+	ctx context.Context,
+	userID uuid.UUID,
+	conv *domain.Conversation,
+	c *domain.Contact,
+	sp *domain.SenderProfile,
+	businessJSON, leadScoreJSON string,
+	sentMsgs []domain.Message,
+	state string,
+) (*domain.Message, error) {
+	var tb strings.Builder
+	for _, m := range sentMsgs {
 		who := "YOU"
 		if m.Direction == domain.DirectionInbound {
 			who = "THEM"
@@ -334,9 +428,11 @@ func (s *Service) DraftReply(ctx context.Context, userID, conversationID uuid.UU
 	}
 
 	prompt := prompts.BuildOutreachReplyPrompt(prompts.OutreachReplyInput{
+		Mode:              state,
 		SenderProfileJSON: prompts.EncodeJSON(sp),
 		ContactJSON:       prompts.EncodeJSON(c),
-		BusinessJSON:      business,
+		BusinessJSON:      businessJSON,
+		LeadScoreJSON:     leadScoreJSON,
 		ConversationText:  tb.String(),
 	})
 	ctxAI := ai.WithUserID(ctx, userID)
@@ -352,12 +448,11 @@ func (s *Service) DraftReply(ctx context.Context, userID, conversationID uuid.UU
 		return nil, errors.New("ai returned empty body")
 	}
 
-	// Subject — reuse conversation subject with Re: prefix if not already.
 	subject := ""
 	if conv.Subject != nil {
 		subject = *conv.Subject
 	}
-	if !strings.HasPrefix(strings.ToLower(subject), "re:") && subject != "" {
+	if state == "reply" && subject != "" && !strings.HasPrefix(strings.ToLower(subject), "re:") {
 		subject = "Re: " + subject
 	}
 	promptV := "outreach_reply_v1"
@@ -373,6 +468,43 @@ func (s *Service) DraftReply(ctx context.Context, userID, conversationID uuid.UU
 	})
 }
 
+// loadLeadScoreJSON returns the best (highest overall_score, newest) lead
+// score for a business scoped to a user. Returns "" if no score found.
+func (s *Service) loadLeadScoreJSON(ctx context.Context, userID, businessID uuid.UUID) string {
+	var (
+		overall       *int
+		purchase      *int
+		dealSize      *int
+		urgency       *int
+		fit           *int
+		access        *int
+		rationale     *string
+		recApproach   *string
+	)
+	err := s.pool.QueryRow(ctx,
+		`SELECT overall_score, purchase_likelihood, deal_size_potential,
+		        urgency_score, fit_score, accessibility_score,
+		        scoring_rationale, recommended_approach
+		 FROM lead_scores
+		 WHERE business_id = $1 AND user_id = $2
+		 ORDER BY overall_score DESC NULLS LAST, scored_at DESC
+		 LIMIT 1`, businessID, userID,
+	).Scan(&overall, &purchase, &dealSize, &urgency, &fit, &access, &rationale, &recApproach)
+	if err != nil {
+		return ""
+	}
+	return prompts.EncodeJSON(map[string]any{
+		"overall_score":        overall,
+		"purchase_likelihood":  purchase,
+		"deal_size_potential":  dealSize,
+		"urgency_score":        urgency,
+		"fit_score":            fit,
+		"accessibility_score":  access,
+		"scoring_rationale":    rationale,
+		"recommended_approach": recApproach,
+	})
+}
+
 // --- internals ---------------------------------------------------------
 
 func (s *Service) draftInitial(ctx context.Context, userID uuid.UUID, c *domain.Contact) (*prompts.OutreachDraftResult, error) {
@@ -382,6 +514,7 @@ func (s *Service) draftInitial(ctx context.Context, userID uuid.UUID, c *domain.
 	}
 	businessJSON := s.loadBusinessJSON(ctx, c.BusinessID)
 	shipmentContext, _ := s.loadShipmentContext(ctx, c.BusinessID)
+	leadScoreJSON := s.loadLeadScoreJSON(ctx, userID, c.BusinessID)
 
 	prompt := prompts.BuildOutreachDraftPrompt(prompts.OutreachDraftInput{
 		SenderProfileJSON:   prompts.EncodeJSON(sp),
@@ -389,7 +522,7 @@ func (s *Service) draftInitial(ctx context.Context, userID uuid.UUID, c *domain.
 		ContactJSON:         prompts.EncodeJSON(c),
 		BusinessJSON:        businessJSON,
 		ShipmentContext:     shipmentContext,
-		LeadScoreJSON:       "",
+		LeadScoreJSON:       leadScoreJSON,
 	})
 	ctxAI := ai.WithUserID(ctx, userID)
 	raw, _, err := s.ai.CompleteJSON(ctxAI, "outreach_draft", prompt.Prompt, prompt.System, 30*time.Minute)
