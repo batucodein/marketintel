@@ -148,8 +148,12 @@ func (c *Channel) ListNewMessages(ctx context.Context, since time.Time) ([]chann
 
 // --- helpers ------------------------------------------------------------
 
-// buildRFC5322 constructs a minimal RFC 5322 message body suitable for
-// Gmail's users.messages.send. We build text + html parts if both supplied.
+// buildRFC5322 constructs an RFC 5322 message body suitable for Gmail's
+// users.messages.send.
+//
+// Shape:
+//   - No attachments, body only: text/plain OR text/html OR multipart/alternative
+//   - With attachments: multipart/mixed wrapping the body part and each attachment
 func buildRFC5322(req channel.SendRequest, fromEmail string) ([]byte, error) {
 	if req.To == "" {
 		return nil, errors.New("missing To")
@@ -169,10 +173,64 @@ func buildRFC5322(req channel.SendRequest, fromEmail string) ([]byte, error) {
 		sb.WriteString("In-Reply-To: " + req.InReplyToExternalID + "\r\n")
 		sb.WriteString("References: " + req.InReplyToExternalID + "\r\n")
 	}
+	if req.UnsubscribeURL != "" {
+		// RFC 8058 one-click unsubscribe. Gmail and other major providers
+		// surface this header as a native "Unsubscribe" link in the UI.
+		sb.WriteString("List-Unsubscribe: <" + req.UnsubscribeURL + ">\r\n")
+		sb.WriteString("List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n")
+	}
 	sb.WriteString("MIME-Version: 1.0\r\n")
 
+	hasAttachments := len(req.Attachments) > 0
+
+	if !hasAttachments {
+		writeBodyPart(&sb, req)
+		return []byte(sb.String()), nil
+	}
+
+	// multipart/mixed: body part + one part per attachment.
+	mixedBoundary := "mi_mixed_" + randomBoundary()
+	sb.WriteString("Content-Type: multipart/mixed; boundary=\"" + mixedBoundary + "\"\r\n\r\n")
+
+	// Body part.
+	sb.WriteString("--" + mixedBoundary + "\r\n")
+	writeBodyPart(&sb, req)
+	sb.WriteString("\r\n")
+
+	// Attachments.
+	for _, att := range req.Attachments {
+		if len(att.Data) == 0 || att.Filename == "" {
+			continue
+		}
+		mimeType := att.MimeType
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		sb.WriteString("--" + mixedBoundary + "\r\n")
+		sb.WriteString("Content-Type: " + mimeType + "; name=\"" + mime.QEncoding.Encode("utf-8", att.Filename) + "\"\r\n")
+		sb.WriteString("Content-Disposition: attachment; filename=\"" + mime.QEncoding.Encode("utf-8", att.Filename) + "\"\r\n")
+		sb.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
+		// Chunk base64 into 76-char lines per RFC 2045.
+		encoded := base64.StdEncoding.EncodeToString(att.Data)
+		for i := 0; i < len(encoded); i += 76 {
+			end := i + 76
+			if end > len(encoded) {
+				end = len(encoded)
+			}
+			sb.WriteString(encoded[i:end] + "\r\n")
+		}
+	}
+
+	sb.WriteString("--" + mixedBoundary + "--\r\n")
+	return []byte(sb.String()), nil
+}
+
+// writeBodyPart writes either a single text/plain, single text/html, or
+// multipart/alternative body block. Does NOT write outer headers (From/To/etc.)
+// or trailing newline — callers control placement.
+func writeBodyPart(sb *strings.Builder, req channel.SendRequest) {
 	if req.BodyHTML != "" && req.BodyText != "" {
-		boundary := "mi_" + randomBoundary()
+		boundary := "mi_alt_" + randomBoundary()
 		sb.WriteString("Content-Type: multipart/alternative; boundary=\"" + boundary + "\"\r\n\r\n")
 		sb.WriteString("--" + boundary + "\r\n")
 		sb.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
@@ -186,14 +244,12 @@ func buildRFC5322(req channel.SendRequest, fromEmail string) ([]byte, error) {
 	} else if req.BodyHTML != "" {
 		sb.WriteString("Content-Type: text/html; charset=utf-8\r\n")
 		sb.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
-		sb.WriteString(req.BodyHTML)
+		sb.WriteString(req.BodyHTML + "\r\n")
 	} else {
 		sb.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 		sb.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
-		sb.WriteString(req.BodyText)
+		sb.WriteString(req.BodyText + "\r\n")
 	}
-
-	return []byte(sb.String()), nil
 }
 
 func randomBoundary() string {

@@ -54,9 +54,34 @@ func (p *Pipeline) ProcessExcel(
 	excelReader io.Reader,
 	fileName string,
 ) (*ProcessResult, error) {
-	slog.Info("pipeline: processing excel upload", "search_id", searchID, "file", fileName)
+	return p.ProcessExcelWithMapping(ctx, searchID, userID, excelReader, fileName, nil)
+}
 
-	records, totalRows, skipped, err := ParseTendataExcelRaw(excelReader)
+// ProcessExcelWithMapping is the new entry point that accepts a
+// user-confirmed header → canonical mapping. When mapping is nil we fall
+// back to the legacy fixed-header parser so existing tests/CLI uploads
+// keep working. PR3 wires the dynamic parser; for now we accept the
+// mapping argument so the public API surface is stable from PR2 onward.
+func (p *Pipeline) ProcessExcelWithMapping(
+	ctx context.Context,
+	searchID, userID uuid.UUID,
+	excelReader io.Reader,
+	fileName string,
+	mapping map[string]string,
+) (*ProcessResult, error) {
+	slog.Info("pipeline: processing excel upload", "search_id", searchID, "file", fileName, "dynamic_mapping", mapping != nil)
+
+	var (
+		records   []ShipmentRecord
+		totalRows int
+		skipped   int
+		err       error
+	)
+	if mapping != nil && len(mapping) > 0 {
+		records, totalRows, skipped, err = ParseExcelWithMapping(excelReader, mapping)
+	} else {
+		records, totalRows, skipped, err = ParseTendataExcelRaw(excelReader)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("parse excel: %w", err)
 	}
@@ -402,27 +427,44 @@ func displayHS(hs string) string {
 }
 
 // aggregationsToBusinesses converts per-consignee aggregations to Business domain records.
-// Uses ShipmentData JSONB column for customs metadata.
+// Uses ShipmentData JSONB column for customs metadata; populates
+// InputFieldPresence + Email when the dynamic importer collected them.
 func aggregationsToBusinesses(importers []ShipmentAggregation, countryCode string) []domain.Business {
 	out := make([]domain.Business, 0, len(importers))
 	for _, imp := range importers {
 		ds := "tendata_import"
 		bt := "confirmed_importer"
 		b := domain.Business{
-			ID:               uuid.New(),
-			Name:             imp.CompanyName,
-			CountryCode:      strPtrIfNotEmpty(countryCode),
-			City:             strPtrIfNotEmpty(imp.City),
-			Address:          strPtrIfNotEmpty(imp.Address),
-			Phone:            strPtrIfNotEmpty(imp.Phone),
-			DataSource:       &ds,
-			BusinessType:     &bt,
-			EnrichmentStatus: "pending",
-			ShipmentData:     shipmentDataJSON(imp),
+			ID:                  uuid.New(),
+			Name:                imp.CompanyName,
+			CountryCode:         strPtrIfNotEmpty(countryCode),
+			City:                strPtrIfNotEmpty(imp.City),
+			Address:             strPtrIfNotEmpty(imp.Address),
+			Phone:               strPtrIfNotEmpty(imp.Phone),
+			Email:               strPtrIfNotEmpty(imp.Email),
+			DataSource:          &ds,
+			BusinessType:        &bt,
+			EnrichmentStatus:    "pending",
+			ShipmentData:        shipmentDataJSON(imp),
+			InputFieldPresence:  presenceJSON(imp.FieldPresence),
 		}
 		out = append(out, b)
 	}
 	return out
+}
+
+// presenceJSON marshals the per-importer canonical-field presence map.
+// Always returns a non-empty JSON object so the JSONB column never sees
+// NULL — matches the migration default of '{}'.
+func presenceJSON(p map[string]bool) json.RawMessage {
+	if p == nil {
+		return json.RawMessage(`{}`)
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return b
 }
 
 // injectContext attaches userID/searchID to ctx for AI logging.

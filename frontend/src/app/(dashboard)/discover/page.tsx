@@ -5,15 +5,22 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { uploadExcel } from "@/lib/api/discover";
+import { previewUpload, importWithMapping } from "@/lib/api/discover";
+import { ColumnMapping } from "@/components/discover/column-mapping";
+import type { ColumnMappingPreview } from "@/lib/types/discover";
 import { FileSpreadsheet, Loader2, Upload, X } from "lucide-react";
+
+// Discover flow:
+//   pick → previewing (AI mapping in flight) → mapping (user confirms) → importing → redirect
+type Step = "pick" | "previewing" | "mapping" | "importing";
 
 export default function DiscoverPage() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [step, setStep] = useState<Step>("pick");
   const [error, setError] = useState("");
+  const [preview, setPreview] = useState<ColumnMappingPreview | null>(null);
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const selected = e.target.files?.[0];
@@ -38,19 +45,73 @@ export default function DiscoverPage() {
     setError("");
   }
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleAnalyze() {
     if (!file) return;
     setError("");
-    setLoading(true);
-
+    setStep("previewing");
     try {
-      const result = await uploadExcel(file);
+      const p = await previewUpload(file);
+      setPreview(p);
+      setStep("mapping");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Preview failed");
+      setStep("pick");
+    }
+  }
+
+  async function handleConfirmMapping(
+    mapping: Record<string, string>,
+    overrides: Record<string, string>,
+  ) {
+    if (!file || !preview) return;
+    setError("");
+    setStep("importing");
+    try {
+      const result = await importWithMapping(file, mapping, preview.confidence, overrides);
       router.push(`/discover/${result.search_id}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Upload failed");
-      setLoading(false);
+      setError(err instanceof Error ? err.message : "Import failed");
+      setStep("mapping");
     }
+  }
+
+  function reset() {
+    setFile(null);
+    setPreview(null);
+    setError("");
+    setStep("pick");
+  }
+
+  // --- Render ----------------------------------------------------------
+
+  if ((step === "mapping" || step === "importing") && preview) {
+    return (
+      <div className="max-w-5xl mx-auto py-6">
+        {error && (
+          <Alert variant="destructive" className="mb-4">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        <ColumnMapping
+          preview={preview}
+          onConfirm={handleConfirmMapping}
+          onCancel={reset}
+          submitting={step === "importing"}
+        />
+      </div>
+    );
+  }
+
+  if (step === "previewing") {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh]">
+        <Loader2 className="h-8 w-8 animate-spin text-blue-700 mb-4" />
+        <p className="text-sm font-medium">Analyzing your file…</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          Reading headers + asking AI to map them to MarketIntel fields.
+        </p>
+      </div>
+    );
   }
 
   return (
@@ -58,13 +119,13 @@ export default function DiscoverPage() {
       <div className="text-center mb-8">
         <h1 className="text-3xl font-bold text-blue-800 mb-2">Upload Shipment Data</h1>
         <p className="text-muted-foreground">
-          Drop your customs Excel to discover and score buyers.
+          Drop any Excel — we&apos;ll map your columns to our fields and call out missing data.
         </p>
       </div>
 
       <Card className="w-full max-w-lg">
         <CardContent className="pt-6">
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-4">
             {error && (
               <Alert variant="destructive">
                 <AlertDescription>{error}</AlertDescription>
@@ -102,25 +163,29 @@ export default function DiscoverPage() {
                   type="button"
                   variant="ghost"
                   size="icon"
-                  onClick={() => setFile(null)}
-                  disabled={loading}
+                  onClick={reset}
+                  disabled={(step as Step) === "previewing"}
                 >
                   <X className="h-4 w-4" />
                 </Button>
               </div>
             )}
 
-            <Button type="submit" disabled={!file || loading} className="w-full">
-              {loading ? (
+            <Button
+              onClick={handleAnalyze}
+              disabled={!file || (step as Step) === "previewing"}
+              className="w-full"
+            >
+              {(step as Step) === "previewing" ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                  Uploading…
+                  Analyzing…
                 </>
               ) : (
                 "Analyze Shipments"
               )}
             </Button>
-          </form>
+          </div>
         </CardContent>
       </Card>
     </div>

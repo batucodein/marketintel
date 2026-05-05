@@ -219,6 +219,18 @@ func (s *Service) SendMessage(ctx context.Context, userID, conversationID uuid.U
 	if conv.ExternalThreadID != nil {
 		sendReq.ThreadID = *conv.ExternalThreadID
 	}
+	// Optionally attach the user's catalog.
+	if req.AttachCatalog {
+		fname, mimeType, data, err := s.sender.GetCatalogData(ctx, userID)
+		if err == nil && len(data) > 0 {
+			sendReq.Attachments = []channel.Attachment{{
+				Filename: fname,
+				MimeType: mimeType,
+				Data:     data,
+			}}
+		}
+		// If no catalog is uploaded we silently skip — the flag is a hint.
+	}
 	res, err := ch.Send(ctx, sendReq)
 	if err != nil {
 		return nil, fmt.Errorf("channel send: %w", err)
@@ -292,6 +304,9 @@ type SendMessageRequest struct {
 	DraftMessageID *uuid.UUID `json:"draft_message_id,omitempty"`
 	Subject        string     `json:"subject,omitempty"`
 	Body           string     `json:"body,omitempty"`
+	// When true, fetch the user's sender-profile catalog and attach it.
+	// No-op if no catalog is uploaded.
+	AttachCatalog bool `json:"attach_catalog,omitempty"`
 }
 
 // DraftReply is now state-aware — it inspects the conversation and picks the
@@ -364,12 +379,15 @@ func (s *Service) draftInitialMessage(
 	sp *domain.SenderProfile,
 	businessJSON, shipmentCtx, leadScoreJSON string,
 ) (*domain.Message, error) {
+	hasCatalog, catalogName := senderCatalog(sp)
 	prompt := prompts.BuildOutreachDraftPrompt(prompts.OutreachDraftInput{
 		SenderProfileJSON: prompts.EncodeJSON(sp),
 		ContactJSON:       prompts.EncodeJSON(c),
 		BusinessJSON:      businessJSON,
 		ShipmentContext:   shipmentCtx,
 		LeadScoreJSON:     leadScoreJSON,
+		HasCatalog:        hasCatalog,
+		CatalogFilename:   catalogName,
 	})
 	ctxAI := ai.WithUserID(ctx, userID)
 	raw, _, err := s.ai.CompleteJSON(ctxAI, "outreach_draft", prompt.Prompt, prompt.System, 30*time.Minute)
@@ -427,6 +445,7 @@ func (s *Service) draftReplyOrFollowup(
 		tb.WriteString(fmt.Sprintf("--- %s (%s) ---\nSubject: %s\n%s\n\n", who, m.Direction, subj, body))
 	}
 
+	hasCatalog, catalogName := senderCatalog(sp)
 	prompt := prompts.BuildOutreachReplyPrompt(prompts.OutreachReplyInput{
 		Mode:              state,
 		SenderProfileJSON: prompts.EncodeJSON(sp),
@@ -434,6 +453,8 @@ func (s *Service) draftReplyOrFollowup(
 		BusinessJSON:      businessJSON,
 		LeadScoreJSON:     leadScoreJSON,
 		ConversationText:  tb.String(),
+		HasCatalog:        hasCatalog,
+		CatalogFilename:   catalogName,
 	})
 	ctxAI := ai.WithUserID(ctx, userID)
 	raw, _, err := s.ai.CompleteJSON(ctxAI, "outreach_reply", prompt.Prompt, prompt.System, 30*time.Minute)
@@ -516,6 +537,7 @@ func (s *Service) draftInitial(ctx context.Context, userID uuid.UUID, c *domain.
 	shipmentContext, _ := s.loadShipmentContext(ctx, c.BusinessID)
 	leadScoreJSON := s.loadLeadScoreJSON(ctx, userID, c.BusinessID)
 
+	hasCatalog, catalogName := senderCatalog(sp)
 	prompt := prompts.BuildOutreachDraftPrompt(prompts.OutreachDraftInput{
 		SenderProfileJSON:   prompts.EncodeJSON(sp),
 		CampaignPositioning: "",
@@ -523,6 +545,8 @@ func (s *Service) draftInitial(ctx context.Context, userID uuid.UUID, c *domain.
 		BusinessJSON:        businessJSON,
 		ShipmentContext:     shipmentContext,
 		LeadScoreJSON:       leadScoreJSON,
+		HasCatalog:          hasCatalog,
+		CatalogFilename:     catalogName,
 	})
 	ctxAI := ai.WithUserID(ctx, userID)
 	raw, _, err := s.ai.CompleteJSON(ctxAI, "outreach_draft", prompt.Prompt, prompt.System, 30*time.Minute)
@@ -600,4 +624,16 @@ func (s *Service) loadShipmentContext(ctx context.Context, id uuid.UUID) (string
 		parts = append(parts, "trust tier: "+sd.TrustTier)
 	}
 	return strings.Join(parts, " | "), nil
+}
+
+// senderCatalog returns whether the sender profile has a catalog uploaded,
+// and the file name to surface to the AI draft.
+func senderCatalog(sp *domain.SenderProfile) (bool, string) {
+	if sp == nil || sp.CatalogFileName == nil || *sp.CatalogFileName == "" {
+		return false, ""
+	}
+	if sp.CatalogSizeBytes == nil || *sp.CatalogSizeBytes <= 0 {
+		return false, ""
+	}
+	return true, *sp.CatalogFileName
 }

@@ -85,6 +85,11 @@ export interface BusinessWithRelevance extends Omit<Business, "social_links"> {
   urgency_score?: number | null;
   fit_score?: number | null;
   accessibility_score?: number | null;
+  // Per-dimension data quality, 0..1 each. Present once Phase B scoring
+  // has run. Keys: deal_size, purchase_likelihood, accessibility, fit, urgency.
+  dimension_completeness?: Record<string, number>;
+  // Canonical-field keys absent in input AND not filled by enrichment.
+  missing_fields?: string[];
   scoring_rationale?: string | null;
   strengths?: string[];
   weaknesses?: string[];

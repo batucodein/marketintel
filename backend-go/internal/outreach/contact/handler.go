@@ -12,20 +12,70 @@ import (
 )
 
 type Handler struct {
-	repo Repository
+	repo       Repository
+	notesRoute chi.Router // mounted at /{contactID}/notes
+	tasksRoute chi.Router // mounted at /{contactID}/tasks (proxies to /outreach/tasks?contact_id=...)
 }
 
 func NewHandler(repo Repository) *Handler {
 	return &Handler{repo: repo}
 }
 
+// SetNestedRoutes lets the outreach composition layer plug nested routers
+// for /{contactID}/notes (and any other future /{contactID}/<thing>) without
+// causing an import cycle between the contact and crm packages.
+func (h *Handler) SetNestedRoutes(notes chi.Router) {
+	h.notesRoute = notes
+}
+
 func (h *Handler) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", h.List)
 	r.Post("/ensure", h.EnsureFromBusiness)
+	r.Patch("/bulk", h.BulkUpdate)
 	r.Get("/{contactID}", h.Get)
 	r.Patch("/{contactID}", h.Update)
+	if h.notesRoute != nil {
+		r.Mount("/{contactID}/notes", h.notesRoute)
+	}
 	return r
+}
+
+type bulkRequest struct {
+	IDs               []uuid.UUID `json:"ids"`
+	PipelineStage     *string     `json:"pipeline_stage,omitempty"`
+	DefaultAutomation *string     `json:"default_automation,omitempty"`
+	DefaultSequenceID *uuid.UUID  `json:"default_sequence_id,omitempty"`
+}
+
+// BulkUpdate applies the provided fields to all listed contacts in one go.
+// Used by the lead-list "bulk actions" UI in P3 (set automation, attach
+// sequence, change pipeline stage on N rows).
+func (h *Handler) BulkUpdate(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req bulkRequest
+	if err := httputil.DecodeJSON(r, &req); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if len(req.IDs) == 0 {
+		httputil.WriteError(w, http.StatusBadRequest, "ids is required")
+		return
+	}
+	n, err := h.repo.BulkUpdate(r.Context(), user.ID, req.IDs, BulkFields{
+		PipelineStage:     req.PipelineStage,
+		DefaultAutomation: req.DefaultAutomation,
+		DefaultSequenceID: req.DefaultSequenceID,
+	})
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{"updated": n})
 }
 
 // EnsureFromBusiness upserts a contact for a (user, business) pair and returns it.

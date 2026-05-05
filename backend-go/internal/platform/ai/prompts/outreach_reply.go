@@ -40,6 +40,9 @@ const outreachReplyTemplate = `## Task mode
 ## Full conversation (oldest first; YOU = outbound, THEM = inbound)
 %s
 
+## Attachment on this outbound
+%s
+
 %s
 
 Return JSON only.`
@@ -54,6 +57,9 @@ type OutreachReplyInput struct {
 	BusinessJSON      string
 	LeadScoreJSON     string // optional; "(not scored)" if absent
 	ConversationText  string
+	// HasCatalog means this outbound will have the sender's catalog PDF attached.
+	HasCatalog      bool
+	CatalogFilename string
 }
 
 type OutreachReplyResult struct {
@@ -81,8 +87,16 @@ func BuildOutreachReplyPrompt(in OutreachReplyInput) OutreachReplyPrompt {
 	if leadScore == "" {
 		leadScore = "(not scored)"
 	}
+	attachment := "(no attachment on this outbound)"
+	if in.HasCatalog {
+		name := in.CatalogFilename
+		if name == "" {
+			name = "catalog.pdf"
+		}
+		attachment = fmt.Sprintf("A product catalog PDF (%s) will be attached. Reference it in ONE short line if relevant — do NOT recap it.", name)
+	}
 	return OutreachReplyPrompt{
 		System: withPreamble(outreachReplySystem),
-		Prompt: fmt.Sprintf(outreachReplyTemplate, mode, in.SenderProfileJSON, contact, leadScore, in.ConversationText, instruction),
+		Prompt: fmt.Sprintf(outreachReplyTemplate, mode, in.SenderProfileJSON, contact, leadScore, in.ConversationText, attachment, instruction),
 	}
 }

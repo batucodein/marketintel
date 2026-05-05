@@ -21,6 +21,7 @@ type ShipmentRecord struct {
 	ConsigneeZip       string
 	ConsigneeCountry   string
 	ConsigneePhone     string
+	ConsigneeEmail     string // populated by parseRowDynamic when consignee_email is mapped
 	ShipperName        string
 	ShipperStdName     string
 	ShipperCity        string
@@ -32,6 +33,10 @@ type ShipmentRecord struct {
 	TotalPrice         float64
 	UnloadingPort      string
 	OriginCountry      string
+	// FieldPresence is set only by ParseExcelWithMapping. nil for the
+	// legacy ParseTendataExcelRaw path; downstream code should treat nil
+	// as "presence unknown — fall back to looking at the value itself".
+	FieldPresence map[string]bool
 }
 
 // SupplierInfo holds a supplier (shipper) with their country.
@@ -50,6 +55,7 @@ type ShipmentAggregation struct {
 	Country          string         `json:"country"`
 	ZipCode          string         `json:"zip_code"`
 	Phone            string         `json:"phone"`
+	Email            string         `json:"email"`
 	TransactionCount int            `json:"transaction_count"`
 	TotalWeightKG    float64        `json:"total_weight_kg"`
 	TotalValueUSD    float64        `json:"total_value_usd"`
@@ -59,6 +65,10 @@ type ShipmentAggregation struct {
 	Suppliers        []SupplierInfo `json:"suppliers"`
 	BuysFromHome     bool           `json:"buys_from_home"`
 	TrustTier        string         `json:"trust_tier"` // "confirmed_buyer" or "confirmed_importer"
+	// FieldPresence is the union of all rows' canonical-field presence
+	// flags for this importer. If ANY row had `consignee_email` mapped
+	// and non-empty, FieldPresence["consignee_email"] is true.
+	FieldPresence map[string]bool `json:"field_presence,omitempty"`
 }
 
 // ExcelImportResult holds the parsed and aggregated output.
@@ -132,6 +142,116 @@ func AggregateRecords(records []ShipmentRecord, homeCountry string) []ShipmentAg
 	return aggregateByConsignee(records, normalizeCountry(homeCountry))
 }
 
+// ParseExcelWithMapping is the dynamic parser. It accepts a user-confirmed
+// {header → canonical_key} mapping and reads each row by canonical key.
+// Multiple headers can map to the same canonical key (e.g. "Phone 1",
+// "Phone 2" both → consignee_phone) — the first non-empty value wins.
+//
+// Each parsed record carries a FieldPresence map that flags which canonical
+// keys actually had a non-empty value for THAT row, so downstream scoring
+// can cap dimensions whose inputs were absent.
+func ParseExcelWithMapping(reader io.Reader, mapping map[string]string) (records []ShipmentRecord, totalRows, skipped int, err error) {
+	f, openErr := excelize.OpenReader(reader)
+	if openErr != nil {
+		return nil, 0, 0, fmt.Errorf("excel: open: %w", openErr)
+	}
+	defer f.Close()
+
+	sheet := f.GetSheetName(0)
+	if sheet == "" {
+		return nil, 0, 0, fmt.Errorf("excel: no sheets found")
+	}
+	rows, err := f.GetRows(sheet)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("excel: read rows: %w", err)
+	}
+	if len(rows) < 2 {
+		return nil, 0, 0, fmt.Errorf("excel: file has no data rows (only %d rows)", len(rows))
+	}
+
+	headers := rows[0]
+
+	// Build canonical → ordered list of column indices (one canonical key
+	// can have multiple source headers).
+	canonToCols := map[string][]int{}
+	for colIdx, h := range headers {
+		canon, ok := mapping[h]
+		if !ok || canon == "" {
+			continue
+		}
+		canonToCols[canon] = append(canonToCols[canon], colIdx)
+	}
+
+	totalRows = len(rows) - 1
+	for i := 1; i < len(rows); i++ {
+		row := rows[i]
+		rec, presence := parseRowDynamic(row, canonToCols)
+		if rec.ConsigneeName == "" && rec.ConsigneeStdName == "" {
+			skipped++
+			continue
+		}
+		rec.FieldPresence = presence
+		records = append(records, rec)
+	}
+	return records, totalRows, skipped, nil
+}
+
+// parseRowDynamic is the per-row reader for the dynamic mapping path.
+// It pulls the first non-empty value for each canonical key from any of
+// the columns the user mapped, and returns the populated ShipmentRecord
+// plus a presence map flagging which canonical keys had data.
+func parseRowDynamic(row []string, canonToCols map[string][]int) (ShipmentRecord, map[string]bool) {
+	get := func(canon string) string {
+		for _, c := range canonToCols[canon] {
+			if c < len(row) {
+				if v := strings.TrimSpace(row[c]); v != "" {
+					return v
+				}
+			}
+		}
+		return ""
+	}
+
+	rec := ShipmentRecord{
+		ArrivalDate:        get("shipment_date"),
+		ConsigneeName:      get("consignee_name"),
+		ConsigneeStdName:   get("consignee_name"),
+		ConsigneeAddress:   get("consignee_address"),
+		ConsigneeState:     get("consignee_state"),
+		ConsigneeCity:      get("consignee_city"),
+		ConsigneeZip:       get("consignee_zip"),
+		ConsigneeCountry:   get("consignee_country"),
+		ConsigneePhone:     get("consignee_phone"),
+		ConsigneeEmail:     get("consignee_email"),
+		ShipperName:        get("shipper_name"),
+		ShipperStdName:     get("shipper_name"),
+		ShipperCity:        get("shipper_city"),
+		ShipperCountry:     get("shipper_country"),
+		HSCode:             get("hs_code"),
+		ProductDescription: get("product_description"),
+		Quantity:           parseFloat(get("quantity")),
+		GrossWeightKG:      parseFloat(get("weight_kg")),
+		TotalPrice:         parseFloat(get("total_value_usd")),
+		UnloadingPort:      get("unloading_port"),
+		OriginCountry:      get("shipper_country"),
+	}
+
+	// Presence reflects only canonical keys that produced a non-empty
+	// value for THIS row — even if mapping included the column.
+	presence := make(map[string]bool, len(canonToCols))
+	for canon := range canonToCols {
+		presence[canon] = get(canon) != ""
+	}
+	// Special-case: consignee_email isn't in ShipmentRecord today but the
+	// importer wants to know if it was present so scoring can later cap
+	// accessibility correctly. We track it in presence even though the
+	// value isn't yet stored on the record.
+	if get("consignee_email") != "" {
+		presence["consignee_email"] = true
+	}
+	return rec, presence
+}
+
 // columnIndex maps known header names to their column positions.
 type columnIndex struct {
 	cols map[string]int
@@ -196,16 +316,30 @@ func aggregateByConsignee(records []ShipmentRecord, homeCountry string) []Shipme
 		agg, exists := groups[key]
 		if !exists {
 			agg = &ShipmentAggregation{
-				CompanyName: coalesce(rec.ConsigneeStdName, rec.ConsigneeName),
-				Address:     rec.ConsigneeAddress,
-				City:        rec.ConsigneeCity,
-				State:       rec.ConsigneeState,
-				Country:     rec.ConsigneeCountry,
-				ZipCode:     rec.ConsigneeZip,
-				Phone:       rec.ConsigneePhone,
+				CompanyName:   coalesce(rec.ConsigneeStdName, rec.ConsigneeName),
+				Address:       rec.ConsigneeAddress,
+				City:          rec.ConsigneeCity,
+				State:         rec.ConsigneeState,
+				Country:       rec.ConsigneeCountry,
+				ZipCode:       rec.ConsigneeZip,
+				Phone:         rec.ConsigneePhone,
+				Email:         rec.ConsigneeEmail,
+				FieldPresence: map[string]bool{},
 			}
 			groups[key] = agg
 			order = append(order, key)
+		}
+		// Merge per-row presence flags into the aggregate. Once any row
+		// for this importer had a canonical field, the aggregate carries
+		// it as present.
+		for k, v := range rec.FieldPresence {
+			if v {
+				agg.FieldPresence[k] = true
+			}
+		}
+		// Backfill email when a later row supplies one.
+		if rec.ConsigneeEmail != "" && agg.Email == "" {
+			agg.Email = rec.ConsigneeEmail
 		}
 
 		agg.TransactionCount++

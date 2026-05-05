@@ -36,3 +36,33 @@ export interface Search {
   created_at: string;
   updated_at: string;
 }
+
+// --- Dynamic ingestion mapping --------------------------------------
+
+export interface CanonicalField {
+  key: string;
+  label: string;
+  group: string;
+  required: boolean;
+  affects_dimension?: string;
+  description?: string;
+}
+
+export interface ColumnMappingPreview {
+  sample: {
+    headers: string[];
+    samples: string[][];
+  };
+  // header → canonical_key (only confident AI suggestions, can be empty)
+  mapping: Record<string, string>;
+  // header → 0..1 confidence
+  confidence: Record<string, number>;
+  // headers the AI didn't map
+  unmapped_headers: string[];
+  // canonical keys that are required but not yet mapped
+  missing_required: string[];
+  // header → AI's reason for the mapping (for the UX tooltip)
+  reasoning: Record<string, string>;
+  canonical: CanonicalField[];
+  data_completeness: number;
+}

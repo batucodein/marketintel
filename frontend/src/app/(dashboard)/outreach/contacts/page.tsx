@@ -1,6 +1,7 @@
 "use client";
 
 import useSWR from "swr";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -66,21 +67,26 @@ export default function ContactsPage() {
     <div className="space-y-2">
       {contacts.map((c) => (
         <Card key={c.id} className="p-3 flex items-center justify-between gap-3">
-          <div className="min-w-0 flex-1">
+          <Link href={`/outreach/contacts/${c.id}`} className="min-w-0 flex-1 hover:underline">
             <div className="flex items-center gap-2">
               <span className="font-medium truncate">{c.display_name}</span>
               <Badge className={STAGE_COLORS[c.pipeline_stage] ?? ""}>
                 {c.pipeline_stage}
               </Badge>
+              {c.unsubscribed_at && (
+                <Badge variant="outline" className="text-red-600 border-red-300">
+                  unsubscribed
+                </Badge>
+              )}
             </div>
             <div className="text-xs text-muted-foreground font-mono truncate">
               {c.primary_email ?? "no email"}
             </div>
-          </div>
+          </Link>
           <Button
             size="sm"
             onClick={() => handleEmail(c)}
-            disabled={busyID === c.id || !c.primary_email}
+            disabled={busyID === c.id || !c.primary_email || !!c.unsubscribed_at}
           >
             {busyID === c.id ? (
               <Loader2 className="h-3 w-3 animate-spin mr-1" />

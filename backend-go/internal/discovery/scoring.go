@@ -163,6 +163,10 @@ func (s *Scorer) scoreOne(
 				sb.EmailVerified = "no"
 			}
 		}
+		// Include the per-row canonical-field presence flags so the AI
+		// (and the server-side dimension cap) can reason about what
+		// data was actually given vs inferred.
+		sb.FieldAvailability = mergeFieldAvailability(b)
 		promptBiz[i] = sb
 	}
 
@@ -192,6 +196,13 @@ func (s *Scorer) scoreOne(
 		return nil, fmt.Errorf("score parse: %w (raw: %.200s)", err, string(raw))
 	}
 
+	// Build a quick lookup from business_id back to the source business so
+	// we can re-derive the FieldAvailability for the dimension cap.
+	byID := make(map[uuid.UUID]domain.Business, len(batch))
+	for _, b := range batch {
+		byID[b.ID] = b
+	}
+
 	scores := make([]domain.LeadScore, 0, len(aiScores))
 	for _, as := range aiScores {
 		bizID, ok := idMap[as.ID]
@@ -202,6 +213,25 @@ func (s *Scorer) scoreOne(
 		// No-hallucination enforcement
 		if as.DataCompleteness == 0 {
 			slog.Warn("scoring missing data_completeness", "business_id", as.ID)
+		}
+
+		// Apply per-dimension caps based on real input availability.
+		availability := mergeFieldAvailability(byID[bizID])
+		var dimComp domain.DimensionCompleteness
+		var missing []string
+		as, dimComp, missing = applyDimensionCaps(as, availability)
+
+		// Recompute overall_score from sub-scores AFTER caps so the
+		// weighted average reflects the clamped values.
+		overall := as.DealSizePotential*0.30 +
+			as.PurchaseLikelihood*0.25 +
+			as.AccessibilityScore*0.25 +
+			as.FitScore*0.15 +
+			as.UrgencyScore*0.05
+		if as.OverallScore > overall+1 {
+			// AI's overall was higher than its own sub-scores would imply;
+			// trust the recomputed value.
+			as.OverallScore = overall
 		}
 
 		// Enforce data_completeness cap server-side (don't trust AI alone)
@@ -224,21 +254,23 @@ func (s *Scorer) scoreOne(
 		}
 
 		score := domain.LeadScore{
-			ID:                 uuid.New(),
-			BusinessID:         bizID,
-			OverallScore:       overallScore,
-			PurchaseLikelihood: intPtr(roundToInt(as.PurchaseLikelihood)),
-			DealSizePotential:  intPtr(roundToInt(as.DealSizePotential)),
-			UrgencyScore:       intPtr(roundToInt(as.UrgencyScore)),
-			FitScore:           intPtr(roundToInt(as.FitScore)),
-			AccessibilityScore: intPtr(roundToInt(as.AccessibilityScore)),
-			ScoringRationale:   strPtr(as.ScoringRationale),
-			Strengths:          as.Strengths,
-			Weaknesses:         as.Weaknesses,
-			RecommendedApproach: strPtr(as.RecommendedApproach),
-			ModelVersion:       aiResult.Model,
-			PromptVersion:      "v2",
-			ScoredAt:           time.Now(),
+			ID:                    uuid.New(),
+			BusinessID:            bizID,
+			OverallScore:          overallScore,
+			PurchaseLikelihood:    intPtr(roundToInt(as.PurchaseLikelihood)),
+			DealSizePotential:     intPtr(roundToInt(as.DealSizePotential)),
+			UrgencyScore:          intPtr(roundToInt(as.UrgencyScore)),
+			FitScore:              intPtr(roundToInt(as.FitScore)),
+			AccessibilityScore:    intPtr(roundToInt(as.AccessibilityScore)),
+			DimensionCompleteness: dimComp,
+			ScoringRationale:      strPtr(as.ScoringRationale),
+			Strengths:             as.Strengths,
+			Weaknesses:            as.Weaknesses,
+			MissingFields:         missing,
+			RecommendedApproach:   strPtr(as.RecommendedApproach),
+			ModelVersion:          aiResult.Model,
+			PromptVersion:         "v3",
+			ScoredAt:              time.Now(),
 		}
 		scores = append(scores, score)
 	}
@@ -247,18 +279,103 @@ func (s *Scorer) scoreOne(
 }
 
 type scoreAIResponse struct {
-	ID                  string   `json:"id"`
-	PurchaseLikelihood  float64  `json:"purchase_likelihood"`
-	DealSizePotential   float64  `json:"deal_size_potential"`
-	UrgencyScore        float64  `json:"urgency_score"`
-	FitScore            float64  `json:"fit_score"`
-	AccessibilityScore  float64  `json:"accessibility_score"`
-	OverallScore        float64  `json:"overall_score"`
-	ScoringRationale    string   `json:"scoring_rationale"`
-	Strengths           []string `json:"strengths"`
-	Weaknesses          []string `json:"weaknesses"`
-	RecommendedApproach string   `json:"recommended_approach"`
-	DataCompleteness    float64  `json:"data_completeness"`
+	ID                    string             `json:"id"`
+	PurchaseLikelihood    float64            `json:"purchase_likelihood"`
+	DealSizePotential     float64            `json:"deal_size_potential"`
+	UrgencyScore          float64            `json:"urgency_score"`
+	FitScore              float64            `json:"fit_score"`
+	AccessibilityScore    float64            `json:"accessibility_score"`
+	OverallScore          float64            `json:"overall_score"`
+	ScoringRationale      string             `json:"scoring_rationale"`
+	Strengths             []string           `json:"strengths"`
+	Weaknesses            []string           `json:"weaknesses"`
+	RecommendedApproach   string             `json:"recommended_approach"`
+	DataCompleteness      float64            `json:"data_completeness"`
+	DimensionCompleteness map[string]float64 `json:"dimension_completeness"`
+	MissingFields         []string           `json:"missing_fields"`
+}
+
+// mergeFieldAvailability builds the per-business presence map fed to the
+// AI scorer. Reads input_field_presence (set by the dynamic Excel
+// importer) as the base, then promotes any field that enrichment has
+// since populated (email, phone, etc.) to true.
+func mergeFieldAvailability(b domain.Business) map[string]bool {
+	out := map[string]bool{}
+	if len(b.InputFieldPresence) > 0 {
+		_ = json.Unmarshal(b.InputFieldPresence, &out)
+	}
+	if b.Email != nil && *b.Email != "" {
+		out["consignee_email"] = true
+	}
+	if b.Phone != nil && *b.Phone != "" {
+		out["consignee_phone"] = true
+	}
+	return out
+}
+
+// applyDimensionCaps clamps a dimension's sub-score when its required
+// canonical fields were entirely absent (defence-in-depth on top of the
+// AI's self-reporting). Returns the (possibly modified) score plus the
+// final dimension_completeness map.
+func applyDimensionCaps(as scoreAIResponse, availability map[string]bool) (scoreAIResponse, domain.DimensionCompleteness, []string) {
+	dc := domain.DimensionCompleteness{}
+	if as.DimensionCompleteness != nil {
+		for k, v := range as.DimensionCompleteness {
+			dc[k] = v
+		}
+	}
+	missing := append([]string(nil), as.MissingFields...)
+
+	dims := []struct {
+		name string
+		cap  float64
+		ref  *float64
+	}{
+		{DimAccessibility, 30, &as.AccessibilityScore},
+		{DimDealSize, 30, &as.DealSizePotential},
+		{DimFit, 35, &as.FitScore},
+		{DimUrgency, 35, &as.UrgencyScore},
+	}
+	for _, d := range dims {
+		needed := FieldsForDimension(d.name)
+		if len(needed) == 0 {
+			continue
+		}
+		anyPresent := false
+		var absent []string
+		for _, k := range needed {
+			if availability[k] {
+				anyPresent = true
+			} else {
+				absent = append(absent, k)
+			}
+		}
+		if !anyPresent {
+			if *d.ref > d.cap {
+				slog.Info("scoring: capping dimension due to missing inputs",
+					"business_id", as.ID, "dim", d.name, "raw", *d.ref, "capped", d.cap, "missing", absent)
+				*d.ref = d.cap
+			}
+			if dc[d.name] > 0.4 {
+				dc[d.name] = 0.4
+			}
+			for _, k := range absent {
+				if !containsString(missing, k) {
+					missing = append(missing, k)
+				}
+			}
+		}
+	}
+	return as, dc, missing
+}
+
+func containsString(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 func roundToInt(v float64) int { return int(math.Round(v)) }

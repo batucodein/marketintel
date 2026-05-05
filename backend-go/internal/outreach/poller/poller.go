@@ -16,8 +16,10 @@ import (
 
 	"github.com/batuhan/marketintel/internal/domain"
 	"github.com/batuhan/marketintel/internal/outreach/channel"
+	"github.com/batuhan/marketintel/internal/outreach/compliance"
 	"github.com/batuhan/marketintel/internal/outreach/contact"
 	"github.com/batuhan/marketintel/internal/outreach/conversation"
+	"github.com/batuhan/marketintel/internal/outreach/events"
 )
 
 // Poller walks every enabled user_channels row and pulls new messages.
@@ -27,6 +29,7 @@ type Poller struct {
 	registry      *channel.Registry
 	conversations conversation.Repository
 	contacts      contact.Repository
+	broker        *events.Broker
 	pool          *pgxpool.Pool
 	interval      time.Duration
 }
@@ -36,6 +39,7 @@ func NewPoller(
 	registry *channel.Registry,
 	conversations conversation.Repository,
 	contacts contact.Repository,
+	broker *events.Broker,
 	pool *pgxpool.Pool,
 	interval time.Duration,
 ) *Poller {
@@ -45,27 +49,38 @@ func NewPoller(
 	return &Poller{
 		channels: channels, registry: registry,
 		conversations: conversations, contacts: contacts,
+		broker: broker,
 		pool: pool, interval: interval,
 	}
 }
 
 // Run blocks until ctx is cancelled. Spawn this from main() in a goroutine.
+// Deprecated: with Cloud Scheduler driving /internal/scheduler/tick, the
+// scheduler calls PollOnce directly each tick. Kept here for local-dev use
+// (set OUTREACH_POLLER_LOCAL=true to spawn it).
 func (p *Poller) Run(ctx context.Context) {
 	slog.Info("outreach poller started", "interval", p.interval)
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
 
 	// First tick immediately (useful in dev).
-	p.pollAll(ctx)
+	p.PollOnce(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			slog.Info("outreach poller stopped")
 			return
 		case <-ticker.C:
-			p.pollAll(ctx)
+			p.PollOnce(ctx)
 		}
 	}
+}
+
+// PollOnce runs a single inbound poll across every enabled channel.
+// Safe to call from the scheduler tick handler; logs errors per-channel
+// rather than aborting the whole pass.
+func (p *Poller) PollOnce(ctx context.Context) {
+	p.pollAll(ctx)
 }
 
 func (p *Poller) pollAll(ctx context.Context) {
@@ -171,6 +186,25 @@ func (p *Poller) persistIncoming(ctx context.Context, uc domain.UserChannel, m c
 	if err == nil && c != nil && c.PipelineStage == domain.PipelineContacted {
 		c.PipelineStage = domain.PipelineReplied
 		_, _ = p.contacts.Update(ctx, *c)
+	}
+
+	// Compliance: scan inbound body for opt-out language and suppress the
+	// contact if found. Conservative match — only obvious phrasing.
+	if c != nil && c.UnsubscribedAt == nil && compliance.LooksLikeOptOut(body) {
+		if err := p.contacts.MarkUnsubscribed(ctx, c.ID, "reply_keyword"); err == nil {
+			slog.Info("poller: contact unsubscribed via reply", "contact_id", c.ID)
+		}
+	}
+
+	// Push to any open SSE subscribers so the inbox / conversation page
+	// updates without a page refresh.
+	if p.broker != nil {
+		convID := conv.ID
+		p.broker.Publish(events.Event{
+			Kind:           events.KindInbound,
+			UserID:         uc.UserID,
+			ConversationID: &convID,
+		})
 	}
 	return true
 }

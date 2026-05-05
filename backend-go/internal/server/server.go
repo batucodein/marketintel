@@ -12,6 +12,7 @@ import (
 	"github.com/batuhan/marketintel/internal/dashboard"
 	"github.com/batuhan/marketintel/internal/discovery"
 	"github.com/batuhan/marketintel/internal/outreach"
+	"github.com/batuhan/marketintel/internal/outreach/internalsched"
 	"github.com/batuhan/marketintel/internal/platform/middleware"
 	"github.com/batuhan/marketintel/internal/scoring"
 )
@@ -23,6 +24,8 @@ type Server struct {
 	scoringHandler   *scoring.Handler
 	dashboardHandler *dashboard.Handler
 	outreachHandler  *outreach.Handler
+	internalHandler  *internalsched.Handler
+	internalToken    string
 	authMw           func(http.Handler) http.Handler
 }
 
@@ -34,6 +37,8 @@ func New(
 	scoringHandler *scoring.Handler,
 	dashboardHandler *dashboard.Handler,
 	outreachHandler *outreach.Handler,
+	internalHandler *internalsched.Handler,
+	internalToken string,
 	corsOrigins []string,
 ) *Server {
 	s := &Server{
@@ -43,6 +48,8 @@ func New(
 		scoringHandler:   scoringHandler,
 		dashboardHandler: dashboardHandler,
 		outreachHandler:  outreachHandler,
+		internalHandler:  internalHandler,
+		internalToken:    internalToken,
 		authMw:           middleware.RequireAuth(jwtValidator, userFetcher),
 	}
 	s.setupMiddleware(corsOrigins)
@@ -82,6 +89,12 @@ func (s *Server) setupRoutes() {
 		s.router.Get("/outreach/channels/gmail/callback", s.outreachHandler.ChannelHandler().GmailCallback)
 	}
 
+	// Public unsubscribe pages — recipients click these links from their inbox.
+	// No JWT; the URL itself carries an HMAC-signed token that proves intent.
+	if s.outreachHandler != nil && s.outreachHandler.ComplianceHandler() != nil {
+		s.router.Mount("/unsubscribe", s.outreachHandler.ComplianceHandler().Routes())
+	}
+
 	// Public auth routes (stricter rate limit: 10 attempts per minute per IP)
 	s.router.Route("/auth", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(10, time.Minute))
@@ -114,4 +127,13 @@ func (s *Server) setupRoutes() {
 			r.Mount("/outreach", s.outreachHandler.Routes())
 		}
 	})
+
+	// /internal/* — protected by a shared-secret header rather than user JWT.
+	// Cloud Scheduler hits POST /internal/scheduler/tick every minute.
+	if s.internalHandler != nil {
+		s.router.Group(func(r chi.Router) {
+			r.Use(internalsched.AuthMiddleware(s.internalToken))
+			r.Mount("/internal", s.internalHandler.Routes())
+		})
+	}
 }

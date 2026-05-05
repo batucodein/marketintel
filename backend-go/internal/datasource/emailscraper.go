@@ -14,7 +14,20 @@ import (
 
 // WebsiteScraper extracts email addresses and company info from websites.
 type WebsiteScraper struct {
-	client *http.Client
+	client       *http.Client
+	jina         *JinaReader
+	userAgents   []string
+	tier2Bytes   int    // fall back to Jina when Tier 1 returns less plain text than this
+}
+
+// defaultUserAgents are modern desktop UA strings rotated per-request to
+// reduce 403s from naive bot blockers. Order is randomised per scraper
+// instance.
+var defaultUserAgents = []string{
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0",
 }
 
 func NewWebsiteScraper() *WebsiteScraper {
@@ -28,6 +41,18 @@ func NewWebsiteScraper() *WebsiteScraper {
 				return nil
 			},
 		},
+		jina:       NewJinaReader(""),
+		userAgents: defaultUserAgents,
+		tier2Bytes: 500,
+	}
+}
+
+// SetTier2 wires the Jina fallback. Pass an empty baseURL to use the
+// public free endpoint, or override for self-hosted Jina.
+func (s *WebsiteScraper) SetTier2(jinaBaseURL string, thresholdBytes int) {
+	s.jina = NewJinaReader(jinaBaseURL)
+	if thresholdBytes > 0 {
+		s.tier2Bytes = thresholdBytes
 	}
 }
 
@@ -232,12 +257,35 @@ func (s *WebsiteScraper) Scrape(ctx context.Context, websiteURL string) (*Scrape
 }
 
 func (s *WebsiteScraper) fetchPage(ctx context.Context, url string) (string, error) {
+	body, err := s.fetchTier1(ctx, url)
+	if err == nil && plainTextLen(body) >= s.tier2Bytes {
+		return body, nil
+	}
+
+	// Tier 2 fallback — Jina Reader. Triggered on 403/blocked AND on
+	// thin responses where JS-rendering is likely required.
+	if s.jina != nil {
+		md, jErr := s.jina.Fetch(ctx, url)
+		if jErr == nil && len(md) > 0 {
+			return md, nil
+		}
+	}
+
+	if err != nil {
+		return body, err
+	}
+	return body, nil
+}
+
+// fetchTier1 is the original net/http path with rotated User-Agents.
+func (s *WebsiteScraper) fetchTier1(ctx context.Context, url string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; MarketIntel/1.0)")
-	req.Header.Set("Accept", "text/html")
+	req.Header.Set("User-Agent", s.pickUA())
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.9")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -254,6 +302,28 @@ func (s *WebsiteScraper) fetchPage(ctx context.Context, url string) (string, err
 		return "", err
 	}
 	return string(body), nil
+}
+
+// pickUA rotates through the configured user-agent list pseudo-randomly
+// using time-based selection (cheap, no shared state to lock).
+func (s *WebsiteScraper) pickUA() string {
+	if len(s.userAgents) == 0 {
+		return "Mozilla/5.0 (compatible; MarketIntel/1.0)"
+	}
+	idx := int(time.Now().UnixNano()/int64(time.Millisecond)) % len(s.userAgents)
+	return s.userAgents[idx]
+}
+
+// plainTextLen estimates the readable text size of a body so we can
+// decide whether it's worth piping into the AI extractor or whether
+// we should fall through to Jina. HTML pages with mostly scripts get a
+// low score even if they're large in bytes.
+func plainTextLen(body string) int {
+	if body == "" {
+		return 0
+	}
+	stripped := htmlToText(body)
+	return len(stripped)
 }
 
 // htmlToText strips HTML tags and returns clean text.

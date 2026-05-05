@@ -26,6 +26,19 @@ type SendRequest struct {
 	// Gmail uses ThreadID; other channels may use InReplyToExternalID.
 	ThreadID            string
 	InReplyToExternalID string
+	// Attachments included with the message. Empty slice = no attachments.
+	Attachments []Attachment
+	// UnsubscribeURL, when set, is rendered into the email's
+	// List-Unsubscribe header and (for compliant transports) appended to
+	// the body. Manual one-off conversation sends leave this empty.
+	UnsubscribeURL string
+}
+
+// Attachment is a file to include with an outbound message.
+type Attachment struct {
+	Filename string
+	MimeType string
+	Data     []byte
 }
 
 // SendResult carries the identifiers the remote service returns so we can

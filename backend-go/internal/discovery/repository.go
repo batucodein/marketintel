@@ -35,6 +35,13 @@ type Repository interface {
 	UpdateBusinessDescription(ctx context.Context, businessID uuid.UUID, description string) error
 	UpdateBusinessWebsiteData(ctx context.Context, businessID uuid.UUID, email, phone, description string, websiteData json.RawMessage) error
 	UpdateBusinessEmailVerified(ctx context.Context, businessID uuid.UUID, verified bool) error
+
+	// Column-mapping persistence — saves which header → canonical_key
+	// mapping was confirmed for an upload. GetColumnMapping returns nil
+	// when no mapping exists for that search (older uploads, or the
+	// legacy auto-import path).
+	SaveColumnMapping(ctx context.Context, searchID uuid.UUID, mapping map[string]string, aiConfidence map[string]float64, userOverrides map[string]string) error
+	GetColumnMapping(ctx context.Context, searchID uuid.UUID) (map[string]string, error)
 }
 
 type repository struct {
@@ -215,24 +222,29 @@ func (r *repository) StoreBulkBusinesses(ctx context.Context, businesses []domai
 			openingHours = json.RawMessage("null")
 		}
 
+		presence := b.InputFieldPresence
+		if presence == nil {
+			presence = json.RawMessage(`{}`)
+		}
+
 		var query string
 		if b.GooglePlaceID != nil {
 			query = `INSERT INTO businesses (id, name, website, google_place_id, country_code, city, address,
 			 latitude, longitude, phone, email, business_type, description, data_source, enrichment_status,
-			 shipment_data, rating, rating_count, google_types, opening_hours)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+			 shipment_data, rating, rating_count, google_types, opening_hours, input_field_presence)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 			 ON CONFLICT (google_place_id) DO UPDATE SET updated_at = now()`
 		} else {
 			query = `INSERT INTO businesses (id, name, website, google_place_id, country_code, city, address,
 			 latitude, longitude, phone, email, business_type, description, data_source, enrichment_status,
-			 shipment_data, rating, rating_count, google_types, opening_hours)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`
+			 shipment_data, rating, rating_count, google_types, opening_hours, input_field_presence)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`
 		}
 		_, err := r.pool.Exec(ctx, query,
 			b.ID, b.Name, b.Website, b.GooglePlaceID, b.CountryCode, b.City, b.Address,
 			b.Latitude, b.Longitude, b.Phone, b.Email, b.BusinessType, b.Description,
 			b.DataSource, b.EnrichmentStatus, shipmentData,
-			b.Rating, b.RatingCount, googleTypes, openingHours,
+			b.Rating, b.RatingCount, googleTypes, openingHours, presence,
 		)
 		if err != nil {
 			slog.Error("store business failed", "name", b.Name, "error", err)
@@ -275,12 +287,13 @@ func (r *repository) StoreClassifications(ctx context.Context, results []domain.
 
 func (r *repository) StoreLeadScores(ctx context.Context, scores []domain.LeadScore) error {
 	for _, s := range scores {
+		dimJSON, _ := domain.MarshalDimensionCompleteness(s.DimensionCompleteness)
 		_, err := r.pool.Exec(ctx,
 			`INSERT INTO lead_scores (id, business_id, market_id, user_id, overall_score,
 			 purchase_likelihood, deal_size_potential, urgency_score, fit_score, accessibility_score,
 			 scoring_rationale, strengths, weaknesses, recommended_approach,
-			 model_version, prompt_version, scored_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+			 model_version, prompt_version, scored_at, dimension_completeness)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 			 ON CONFLICT (business_id, market_id, user_id) DO UPDATE SET
 			   overall_score = EXCLUDED.overall_score,
 			   purchase_likelihood = EXCLUDED.purchase_likelihood,
@@ -293,11 +306,13 @@ func (r *repository) StoreLeadScores(ctx context.Context, scores []domain.LeadSc
 			   weaknesses = EXCLUDED.weaknesses,
 			   recommended_approach = EXCLUDED.recommended_approach,
 			   model_version = EXCLUDED.model_version,
-			   scored_at = EXCLUDED.scored_at`,
+			   prompt_version = EXCLUDED.prompt_version,
+			   scored_at = EXCLUDED.scored_at,
+			   dimension_completeness = EXCLUDED.dimension_completeness`,
 			s.ID, s.BusinessID, s.MarketID, s.UserID, s.OverallScore,
 			s.PurchaseLikelihood, s.DealSizePotential, s.UrgencyScore, s.FitScore, s.AccessibilityScore,
 			s.ScoringRationale, s.Strengths, s.Weaknesses, s.RecommendedApproach,
-			s.ModelVersion, s.PromptVersion, s.ScoredAt,
+			s.ModelVersion, s.PromptVersion, s.ScoredAt, dimJSON,
 		)
 		if err != nil {
 			slog.Error("store lead score failed", "business_id", s.BusinessID, "error", err)
@@ -422,7 +437,8 @@ func (r *repository) ListBusinessesByMarket(ctx context.Context, marketID uuid.U
 		        bm.relevance_score, bm.discovered_via,
 		        ls.overall_score, ls.purchase_likelihood, ls.deal_size_potential,
 		        ls.urgency_score, ls.fit_score, ls.accessibility_score,
-		        ls.scoring_rationale, ls.strengths, ls.weaknesses, ls.recommended_approach
+		        ls.scoring_rationale, ls.strengths, ls.weaknesses, ls.recommended_approach,
+		        ls.dimension_completeness
 		 FROM businesses b
 		 JOIN business_markets bm ON b.id = bm.business_id
 		 LEFT JOIN lead_scores ls ON ls.business_id = b.id AND ls.market_id = bm.market_id
@@ -439,6 +455,7 @@ func (r *repository) ListBusinessesByMarket(ctx context.Context, marketID uuid.U
 	var results []domain.BusinessWithRelevance
 	for rows.Next() {
 		var bwr domain.BusinessWithRelevance
+		var dimRaw []byte
 		err := rows.Scan(
 			&bwr.ID, &bwr.Name, &bwr.Website, &bwr.GooglePlaceID, &bwr.CountryCode, &bwr.City, &bwr.Address,
 			&bwr.Latitude, &bwr.Longitude, &bwr.Industry, &bwr.SubIndustry, &bwr.BusinessType, &bwr.Description,
@@ -448,9 +465,13 @@ func (r *repository) ListBusinessesByMarket(ctx context.Context, marketID uuid.U
 			&bwr.OverallScore, &bwr.PurchaseLikelihood, &bwr.DealSizePotential,
 			&bwr.UrgencyScore, &bwr.FitScore, &bwr.AccessibilityScore,
 			&bwr.ScoringRationale, &bwr.Strengths, &bwr.Weaknesses, &bwr.RecommendedApproach,
+			&dimRaw,
 		)
 		if err != nil {
 			return nil, 0, fmt.Errorf("scan business: %w", err)
+		}
+		if len(dimRaw) > 0 {
+			_ = json.Unmarshal(dimRaw, &bwr.DimensionCompleteness)
 		}
 		// Compute trust tier from data source + business type
 		ds := ""
@@ -467,4 +488,74 @@ func (r *repository) ListBusinessesByMarket(ctx context.Context, marketID uuid.U
 
 	return results, total, nil
 }
+
+// SaveColumnMapping records which header → canonical mapping the user
+// confirmed for this upload. Idempotent (PRIMARY KEY on search_id);
+// re-running for the same search overwrites.
+func (r *repository) SaveColumnMapping(ctx context.Context, searchID uuid.UUID, mapping map[string]string, aiConfidence map[string]float64, userOverrides map[string]string) error {
+	if mapping == nil {
+		mapping = map[string]string{}
+	}
+	if aiConfidence == nil {
+		aiConfidence = map[string]float64{}
+	}
+	if userOverrides == nil {
+		userOverrides = map[string]string{}
+	}
+	mappingJSON, err := json.Marshal(mapping)
+	if err != nil {
+		return fmt.Errorf("marshal mapping: %w", err)
+	}
+	confJSON, err := json.Marshal(aiConfidence)
+	if err != nil {
+		return fmt.Errorf("marshal ai_confidence: %w", err)
+	}
+	overridesJSON, err := json.Marshal(userOverrides)
+	if err != nil {
+		return fmt.Errorf("marshal user_overrides: %w", err)
+	}
+
+	// Build the unmapped[] from mapping keys not present (server-side
+	// truth, derived from the input).
+	unmappedJSON := []byte("[]")
+
+	_, err = r.pool.Exec(ctx,
+		`INSERT INTO search_column_mappings (search_id, mapping, ai_confidence, user_overrides, unmapped)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (search_id) DO UPDATE SET
+		   mapping = EXCLUDED.mapping,
+		   ai_confidence = EXCLUDED.ai_confidence,
+		   user_overrides = EXCLUDED.user_overrides,
+		   unmapped = EXCLUDED.unmapped`,
+		searchID, mappingJSON, confJSON, overridesJSON, unmappedJSON,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert column mapping: %w", err)
+	}
+	return nil
+}
+
+func (r *repository) GetColumnMapping(ctx context.Context, searchID uuid.UUID) (map[string]string, error) {
+	var raw json.RawMessage
+	err := r.pool.QueryRow(ctx,
+		`SELECT mapping FROM search_column_mappings WHERE search_id = $1`,
+		searchID,
+	).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get column mapping: %w", err)
+	}
+	var out map[string]string
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decode mapping: %w", err)
+	}
+	return out, nil
+}
+
+// suppress unused-import warning in dev builds where slog isn't yet used
+// in the new methods (kept here so future maintenance can easily add
+// instrumentation without re-importing).
+var _ = slog.Default
 

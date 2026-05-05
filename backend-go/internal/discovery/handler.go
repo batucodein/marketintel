@@ -14,21 +14,37 @@ import (
 type Handler struct {
 	pipeline *Pipeline
 	repo     Repository
+	mapper   *AIMapper
 }
 
-func NewHandler(pipeline *Pipeline, repo Repository) *Handler {
-	return &Handler{pipeline: pipeline, repo: repo}
+func NewHandler(pipeline *Pipeline, repo Repository, mapper *AIMapper) *Handler {
+	return &Handler{pipeline: pipeline, repo: repo, mapper: mapper}
 }
 
 // Routes returns a chi router with the discovery endpoints.
-// Flow: POST / → upload Excel → get {search_id, markets}.
-// Poll GET /{searchID} for status. Markets are fetched per-id via /markets/{id}.
+// Flow:
+//   POST  /preview    → upload Excel, get headers + AI mapping (no DB writes)
+//   POST  /import     → upload Excel + user-confirmed mapping → kicks off pipeline
+//   POST  /           → legacy: preview→import in one shot using AI mapping
+//   GET   /canonical  → list of canonical fields the mapping UI knows about
+//   GET   /{searchID} → poll search state
 func (h *Handler) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Post("/", h.UploadExcel)
+	r.Post("/preview", h.Preview)
+	r.Post("/import", h.ImportWithMapping)
+	r.Get("/canonical", h.Canonical)
 	r.Get("/{searchID}", h.GetSearch)
 	r.Get("/{searchID}/markets", h.GetMarkets)
 	return r
+}
+
+// Canonical exposes the canonical field catalog so the mapping UI can
+// render dropdowns without hard-coding the list. Public-shape JSON.
+func (h *Handler) Canonical(w http.ResponseWriter, r *http.Request) {
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{
+		"fields": Canonical,
+	})
 }
 
 // GetSearch returns the current state and status of a discovery.

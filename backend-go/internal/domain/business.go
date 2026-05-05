@@ -35,6 +35,11 @@ type Business struct {
 	RatingCount           *int             `json:"rating_count" db:"rating_count"`
 	GoogleTypes           json.RawMessage  `json:"google_types" db:"google_types"`
 	OpeningHours          json.RawMessage  `json:"opening_hours" db:"opening_hours"`
+	// InputFieldPresence is the per-row map of which canonical fields the
+	// source upload actually carried for THIS business — set by the
+	// dynamic Excel importer. Format: {"consignee_email": true,
+	// "total_value_usd": false, ...}. Used by existence-aware scoring.
+	InputFieldPresence    json.RawMessage  `json:"input_field_presence" db:"input_field_presence"`
 	DataSource            *string          `json:"data_source" db:"data_source"`
 	EnrichmentStatus      string           `json:"enrichment_status" db:"enrichment_status"`
 	LastEnrichedAt        *time.Time       `json:"last_enriched_at" db:"last_enriched_at"`
@@ -64,14 +69,16 @@ type BusinessWithRelevance struct {
 	ShipmentData json.RawMessage `json:"shipment_data" db:"shipment_data"`
 
 	// Scoring fields (from lead_scores LEFT JOIN, nullable when not yet scored)
-	OverallScore        *int       `json:"overall_score,omitempty"`
-	PurchaseLikelihood  *int       `json:"purchase_likelihood,omitempty"`
-	DealSizePotential   *int       `json:"deal_size_potential,omitempty"`
-	UrgencyScore        *int       `json:"urgency_score,omitempty"`
-	FitScore            *int       `json:"fit_score,omitempty"`
-	AccessibilityScore  *int       `json:"accessibility_score,omitempty"`
-	ScoringRationale    *string    `json:"scoring_rationale,omitempty"`
-	Strengths           []string   `json:"strengths,omitempty"`
-	Weaknesses          []string   `json:"weaknesses,omitempty"`
-	RecommendedApproach *string    `json:"recommended_approach,omitempty"`
+	OverallScore          *int                  `json:"overall_score,omitempty"`
+	PurchaseLikelihood    *int                  `json:"purchase_likelihood,omitempty"`
+	DealSizePotential     *int                  `json:"deal_size_potential,omitempty"`
+	UrgencyScore          *int                  `json:"urgency_score,omitempty"`
+	FitScore              *int                  `json:"fit_score,omitempty"`
+	AccessibilityScore    *int                  `json:"accessibility_score,omitempty"`
+	DimensionCompleteness DimensionCompleteness `json:"dimension_completeness,omitempty"`
+	ScoringRationale      *string               `json:"scoring_rationale,omitempty"`
+	Strengths             []string              `json:"strengths,omitempty"`
+	Weaknesses            []string              `json:"weaknesses,omitempty"`
+	MissingFields         []string              `json:"missing_fields,omitempty"`
+	RecommendedApproach   *string               `json:"recommended_approach,omitempty"`
 }

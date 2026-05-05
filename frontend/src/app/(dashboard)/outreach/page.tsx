@@ -7,14 +7,20 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { listConversations, deleteConversation } from "@/lib/api/outreach";
+import { useOutreachEvents } from "@/lib/sse/use-outreach-events";
 import { Inbox as InboxIcon, Loader2, Trash2 } from "lucide-react";
 
 export default function OutreachInboxPage() {
   const { data, isLoading, mutate } = useSWR(
     "/outreach/conversations",
     () => listConversations(false, 1, 50),
-    { refreshInterval: 30000 },
+    { refreshInterval: 60000 },
   );
+
+  // Real-time push: revalidate the inbox the moment a new inbound lands.
+  useOutreachEvents((e) => {
+    if (e.kind === "inbound") mutate();
+  });
   const [deletingID, setDeletingID] = useState<string | null>(null);
 
   async function handleDelete(e: React.MouseEvent, id: string) {

@@ -21,6 +21,8 @@ type Contact struct {
 	PipelineStage     string     `json:"pipeline_stage" db:"pipeline_stage"`
 	DefaultAutomation string     `json:"default_automation" db:"default_automation"`
 	DefaultSequenceID *uuid.UUID `json:"default_sequence_id" db:"default_sequence_id"`
+	UnsubscribedAt    *time.Time `json:"unsubscribed_at,omitempty" db:"unsubscribed_at"`
+	UnsubscribeReason *string    `json:"unsubscribe_reason,omitempty" db:"unsubscribe_reason"`
 	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at"`
 }
@@ -56,6 +58,7 @@ type UserChannel struct {
 	OAuthExpiresAt           *time.Time      `json:"oauth_expires_at" db:"oauth_expires_at"`
 	OAuthScope               *string         `json:"oauth_scope" db:"oauth_scope"`
 	ConfigCipher             json.RawMessage `json:"-" db:"config_encrypted"`
+	UnsubscribeSecret        []byte          `json:"-" db:"unsubscribe_secret"`
 	Enabled                  bool            `json:"enabled" db:"enabled"`
 	IsDefault                bool            `json:"is_default" db:"is_default"`
 	LastPollAt               *time.Time      `json:"last_poll_at" db:"last_poll_at"`
@@ -76,15 +79,24 @@ const (
 // SenderProfile is the "what I sell" context used for AI personalization.
 // One per user. Campaigns may override specific fields.
 type SenderProfile struct {
-	UserID                  uuid.UUID  `json:"user_id" db:"user_id"`
-	CompanyName             string     `json:"company_name" db:"company_name"`
-	ProductDescription      string     `json:"product_description" db:"product_description"`
-	ValueProp               string     `json:"value_prop" db:"value_prop"`
-	TargetBuyerDescription  string     `json:"target_buyer_description" db:"target_buyer_description"`
-	Tone                    string     `json:"tone" db:"tone"`
-	Signature               string     `json:"signature" db:"signature"`
-	DefaultChannelID        *uuid.UUID `json:"default_channel_id" db:"default_channel_id"`
-	UpdatedAt               time.Time  `json:"updated_at" db:"updated_at"`
+	UserID                 uuid.UUID  `json:"user_id" db:"user_id"`
+	CompanyName            string     `json:"company_name" db:"company_name"`
+	ProductDescription     string     `json:"product_description" db:"product_description"`
+	ValueProp              string     `json:"value_prop" db:"value_prop"`
+	TargetBuyerDescription string     `json:"target_buyer_description" db:"target_buyer_description"`
+	Tone                   string     `json:"tone" db:"tone"`
+	Signature              string     `json:"signature" db:"signature"`
+	PhysicalAddress        string     `json:"physical_address" db:"physical_address"`
+	DefaultChannelID       *uuid.UUID `json:"default_channel_id" db:"default_channel_id"`
+
+	// Catalog metadata. Bytes live in sender_profiles.catalog_data but are
+	// NEVER included in the JSON response — fetched separately during send.
+	CatalogFileName   *string    `json:"catalog_file_name,omitempty" db:"catalog_file_name"`
+	CatalogMimeType   *string    `json:"catalog_mime_type,omitempty" db:"catalog_mime_type"`
+	CatalogSizeBytes  *int       `json:"catalog_size_bytes,omitempty" db:"catalog_size_bytes"`
+	CatalogUploadedAt *time.Time `json:"catalog_uploaded_at,omitempty" db:"catalog_uploaded_at"`
+
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // --- Conversation -------------------------------------------------------
@@ -163,4 +175,164 @@ type ConversationWithContext struct {
 	BusinessName      string    `json:"business_name"`
 	LastMessageSnippet *string  `json:"last_message_snippet"`
 	MessageCount       int      `json:"message_count"`
+}
+
+// --- Campaign -----------------------------------------------------------
+
+// Campaign is a named batch of outreach with shared positioning.
+type Campaign struct {
+	ID                   uuid.UUID       `json:"id" db:"id"`
+	UserID               uuid.UUID       `json:"user_id" db:"user_id"`
+	ChannelID            uuid.UUID       `json:"channel_id" db:"channel_id"`
+	Name                 string          `json:"name" db:"name"`
+	Goal                 string          `json:"goal" db:"goal"`
+	Status               string          `json:"status" db:"status"`
+	PositioningOverride  json.RawMessage `json:"positioning_override,omitempty" db:"positioning_override"`
+	SequenceID           *uuid.UUID      `json:"sequence_id" db:"sequence_id"`
+	SendPacePerDay       int             `json:"send_pace_per_day" db:"send_pace_per_day"`
+	AttachCatalog        bool            `json:"attach_catalog" db:"attach_catalog"`
+	StartAt              *time.Time      `json:"start_at" db:"start_at"`
+	StartedAt            *time.Time      `json:"started_at" db:"started_at"`
+	CompletedAt          *time.Time      `json:"completed_at" db:"completed_at"`
+	CreatedAt            time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt            time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+const (
+	CampaignStatusDraft     = "draft"
+	CampaignStatusReady     = "ready"
+	CampaignStatusActive    = "active"
+	CampaignStatusPaused    = "paused"
+	CampaignStatusCompleted = "completed"
+	CampaignStatusStopped   = "stopped"
+)
+
+// CampaignContact is the membership row tying a contact to a campaign with
+// its per-row drafting/send state.
+type CampaignContact struct {
+	CampaignID       uuid.UUID  `json:"campaign_id" db:"campaign_id"`
+	ContactID        uuid.UUID  `json:"contact_id" db:"contact_id"`
+	MarketID         *uuid.UUID `json:"market_id" db:"market_id"`
+	Status           string     `json:"status" db:"status"`
+	DraftMessageID   *uuid.UUID `json:"draft_message_id" db:"draft_message_id"`
+	ConversationID   *uuid.UUID `json:"conversation_id" db:"conversation_id"`
+	ScheduledSendAt  *time.Time `json:"scheduled_send_at" db:"scheduled_send_at"`
+	SentAt           *time.Time `json:"sent_at" db:"sent_at"`
+	RepliedAt        *time.Time `json:"replied_at" db:"replied_at"`
+	SkipReason       *string    `json:"skip_reason" db:"skip_reason"`
+	AddedAt          time.Time  `json:"added_at" db:"added_at"`
+}
+
+const (
+	CampaignContactPending  = "pending"
+	CampaignContactDrafted  = "drafted"
+	CampaignContactApproved = "approved"
+	CampaignContactSent     = "sent"
+	CampaignContactReplied  = "replied"
+	CampaignContactCold     = "cold"
+	CampaignContactSkipped  = "skipped"
+	CampaignContactFailed   = "failed"
+)
+
+// CampaignSummary is the dashboard-friendly view of a campaign with its
+// per-status counts, used by the campaign detail page.
+type CampaignSummary struct {
+	Campaign
+	PendingCount  int `json:"pending_count"`
+	DraftedCount  int `json:"drafted_count"`
+	ApprovedCount int `json:"approved_count"`
+	SentCount     int `json:"sent_count"`
+	RepliedCount  int `json:"replied_count"`
+	SkippedCount  int `json:"skipped_count"`
+	FailedCount   int `json:"failed_count"`
+	TotalCount    int `json:"total_count"`
+}
+
+// --- Sequence -----------------------------------------------------------
+
+// Sequence is a follow-up playbook (a list of timed steps).
+type Sequence struct {
+	ID          uuid.UUID `json:"id" db:"id"`
+	UserID      uuid.UUID `json:"user_id" db:"user_id"`
+	Name        string    `json:"name" db:"name"`
+	Description string    `json:"description" db:"description"`
+	IsTemplate  bool      `json:"is_template" db:"is_template"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// SequenceStep is one step in a sequence.
+type SequenceStep struct {
+	ID             uuid.UUID `json:"id" db:"id"`
+	SequenceID     uuid.UUID `json:"sequence_id" db:"sequence_id"`
+	StepNumber     int       `json:"step_number" db:"step_number"`
+	WaitDays       int       `json:"wait_days" db:"wait_days"`
+	Trigger        string    `json:"trigger" db:"trigger"`
+	Action         string    `json:"action" db:"action"`
+	PromptOverride *string   `json:"prompt_override" db:"prompt_override"`
+	AutoSend       bool      `json:"auto_send" db:"auto_send"`
+}
+
+const (
+	SequenceTriggerNoReply       = "no_reply"
+	SequenceTriggerAnyReply      = "any_reply"
+	SequenceTriggerPositiveReply = "positive_reply"
+	SequenceTriggerAlways        = "always"
+
+	SequenceActionSendMessage  = "send_message"
+	SequenceActionMarkCold     = "mark_cold"
+	SequenceActionNotifyUser   = "notify_user"
+	SequenceActionAdvanceStage = "advance_stage"
+)
+
+// SequenceWithSteps is the API-facing sequence, used in handler responses.
+type SequenceWithSteps struct {
+	Sequence
+	Steps           []SequenceStep `json:"steps"`
+	ActiveRunsCount int            `json:"active_runs_count"`
+}
+
+// SequenceRun tracks one conversation's progress through a sequence.
+type SequenceRun struct {
+	ID             uuid.UUID `json:"id" db:"id"`
+	SequenceID     uuid.UUID `json:"sequence_id" db:"sequence_id"`
+	ConversationID uuid.UUID `json:"conversation_id" db:"conversation_id"`
+	CurrentStep    int       `json:"current_step" db:"current_step"`
+	NextRunAt      time.Time `json:"next_run_at" db:"next_run_at"`
+	Status         string    `json:"status" db:"status"`
+	LastError      *string   `json:"last_error" db:"last_error"`
+	CreatedAt      time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at" db:"updated_at"`
+}
+
+const (
+	SequenceRunActive          = "active"
+	SequenceRunPaused          = "paused"
+	SequenceRunCompleted       = "completed"
+	SequenceRunStoppedOnReply  = "stopped_on_reply"
+)
+
+// --- Tasks & notes ------------------------------------------------------
+
+// Task is a CRM to-do, optionally tied to a contact and/or conversation.
+type Task struct {
+	ID             uuid.UUID  `json:"id" db:"id"`
+	UserID         uuid.UUID  `json:"user_id" db:"user_id"`
+	ContactID      *uuid.UUID `json:"contact_id" db:"contact_id"`
+	ConversationID *uuid.UUID `json:"conversation_id" db:"conversation_id"`
+	Title          string     `json:"title" db:"title"`
+	Body           string     `json:"body" db:"body"`
+	DueAt          *time.Time `json:"due_at" db:"due_at"`
+	CompletedAt    *time.Time `json:"completed_at" db:"completed_at"`
+	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at" db:"updated_at"`
+}
+
+// Note is a free-text annotation attached to a contact.
+type Note struct {
+	ID        uuid.UUID `json:"id" db:"id"`
+	UserID    uuid.UUID `json:"user_id" db:"user_id"`
+	ContactID uuid.UUID `json:"contact_id" db:"contact_id"`
+	Body      string    `json:"body" db:"body"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }

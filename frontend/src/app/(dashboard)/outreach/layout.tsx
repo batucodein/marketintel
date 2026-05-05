@@ -3,10 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { Inbox, Users, Settings, Mail } from "lucide-react";
+import { Inbox, Users, Settings, Mail, Megaphone, Workflow, CheckSquare } from "lucide-react";
 
 const SUB_NAV = [
   { href: "/outreach", label: "Inbox", icon: Inbox, exact: true },
+  { href: "/outreach/campaigns", label: "Campaigns", icon: Megaphone },
+  { href: "/outreach/sequences", label: "Sequences", icon: Workflow },
+  { href: "/outreach/tasks", label: "Tasks", icon: CheckSquare },
   { href: "/outreach/contacts", label: "Contacts", icon: Users },
   { href: "/outreach/settings/profile", label: "Sender profile", icon: Mail },
   { href: "/outreach/settings/channels", label: "Channels", icon: Settings },
@@ -15,7 +18,7 @@ const SUB_NAV = [
 export default function OutreachLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   return (
-    <div className="flex flex-col gap-4 h-full">
+    <div className="flex flex-col gap-4">
       <div className="flex items-center gap-2 border-b border-border pb-2 -mx-4 px-4 lg:-mx-6 lg:px-6 overflow-x-auto">
         {SUB_NAV.map((item) => {
           const active = item.exact ? pathname === item.href : pathname.startsWith(item.href);
@@ -36,7 +39,7 @@ export default function OutreachLayout({ children }: { children: React.ReactNode
           );
         })}
       </div>
-      <div className="flex-1">{children}</div>
+      <div>{children}</div>
     </div>
   );
 }

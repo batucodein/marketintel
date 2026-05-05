@@ -6,6 +6,7 @@ import type { BusinessWithRelevance } from "@/lib/types/business";
 import { TrustTierBadge } from "@/components/leads/trust-tier-badge";
 import { ScoringRationale } from "@/components/leads/scoring-rationale";
 import { ScoreBreakdown } from "@/components/leads/score-breakdown";
+import { DimensionBars } from "@/components/leads/dimension-bars";
 import { ImportHistory } from "@/components/leads/import-history";
 import { GooglePlacesProfile } from "@/components/leads/google-places-profile";
 import { ScoreBar } from "@/components/shared/score-bar";
@@ -224,6 +225,7 @@ export function LeadDetailDrawer({ lead, marketId, onClose, onLeadUpdated }: Lea
                 <span className="text-lg font-bold font-mono">{lead.overall_score}</span>
               </div>
               <ScoreBreakdown lead={lead} />
+              <DimensionBars lead={lead} />
               <ScoringRationale lead={lead} />
             </Section>
           )}

@@ -40,7 +40,7 @@ export default function ChannelsPage() {
   }
 
   async function handleDelete(id: string) {
-    if (!confirm("Disconnect this channel? Existing conversations stay but no new messages can be sent/received through it.")) return;
+    if (!confirm("Disconnect this channel? Conversation history stays in your inbox; you can reconnect later by clicking Connect Gmail with the same account.")) return;
     await deleteChannel(id);
     mutate();
   }
@@ -96,10 +96,10 @@ export default function ChannelsPage() {
               {data.map((ch) => (
                 <div
                   key={ch.id}
-                  className="flex items-center justify-between border rounded-md p-3"
+                  className={`flex items-center justify-between border rounded-md p-3 ${ch.enabled ? "" : "opacity-60"}`}
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <Mail className="h-5 w-5 text-blue-700 shrink-0" />
+                    <Mail className={`h-5 w-5 shrink-0 ${ch.enabled ? "text-blue-700" : "text-muted-foreground"}`} />
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="font-medium truncate">{ch.display_label}</span>
@@ -108,29 +108,42 @@ export default function ChannelsPage() {
                             Default
                           </Badge>
                         )}
+                        {!ch.enabled && (
+                          <Badge variant="outline" className="text-xs">
+                            Disconnected
+                          </Badge>
+                        )}
                       </div>
                       <div className="text-xs text-muted-foreground font-mono">{ch.from_email}</div>
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    {!ch.is_default && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => handleSetDefault(ch.id)}
-                        title="Make default"
-                      >
-                        <Star className="h-4 w-4" />
+                    {!ch.enabled ? (
+                      <Button size="sm" variant="outline" onClick={handleConnect}>
+                        Reconnect
                       </Button>
+                    ) : (
+                      <>
+                        {!ch.is_default && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleSetDefault(ch.id)}
+                            title="Make default"
+                          >
+                            <Star className="h-4 w-4" />
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleDelete(ch.id)}
+                          title="Disconnect (keeps history)"
+                        >
+                          <Trash2 className="h-4 w-4 text-red-600" />
+                        </Button>
+                      </>
                     )}
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => handleDelete(ch.id)}
-                      title="Disconnect"
-                    >
-                      <Trash2 className="h-4 w-4 text-red-600" />
-                    </Button>
                   </div>
                 </div>
               ))}

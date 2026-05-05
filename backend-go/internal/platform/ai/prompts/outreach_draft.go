@@ -55,16 +55,24 @@ const outreachDraftTemplate = `## Sender profile
 ## Lead score (our system's analysis of this buyer)
 %s
 
+## Attachment
+%s
+
 Draft the email now. Return JSON only.`
 
 // OutreachDraftInput is the typed input for the drafter.
 type OutreachDraftInput struct {
-	SenderProfileJSON    string
-	CampaignPositioning  string // empty string if using sender profile defaults
-	ContactJSON          string
-	BusinessJSON         string
-	ShipmentContext      string // the same format used in scoring.go
-	LeadScoreJSON        string // strengths, rationale — helps AI pick signals to cite
+	SenderProfileJSON   string
+	CampaignPositioning string // empty string if using sender profile defaults
+	ContactJSON         string
+	BusinessJSON        string
+	ShipmentContext     string // the same format used in scoring.go
+	LeadScoreJSON       string // strengths, rationale — helps AI pick signals to cite
+	// Catalog attachment — when true, the sender's catalog PDF will be attached
+	// to this email. The draft should reference it naturally (one short line)
+	// rather than recap its contents.
+	HasCatalog      bool
+	CatalogFilename string
 }
 
 // OutreachDraftResult is the parsed AI response.
@@ -94,12 +102,20 @@ func BuildOutreachDraftPrompt(in OutreachDraftInput) OutreachDraftPrompt {
 	if score == "" {
 		score = "(not scored yet)"
 	}
+	attachment := "(no attachment)"
+	if in.HasCatalog {
+		name := in.CatalogFilename
+		if name == "" {
+			name = "catalog.pdf"
+		}
+		attachment = fmt.Sprintf("A product catalog PDF (%s) will be attached to this email. Reference it naturally in ONE short line (e.g., \"I've attached our catalog for your review.\") — do NOT summarize its contents and do NOT make the email about the catalog.", name)
+	}
 	return OutreachDraftPrompt{
 		System: withPreamble(outreachDraftSystem),
 		Prompt: fmt.Sprintf(outreachDraftTemplate,
 			in.SenderProfileJSON, positioning,
 			in.ContactJSON, in.BusinessJSON,
-			shipment, score,
+			shipment, score, attachment,
 		),
 	}
 }

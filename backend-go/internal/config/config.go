@@ -65,6 +65,19 @@ type Config struct {
 	// AES-256 key (32 bytes base64-encoded) used to encrypt OAuth tokens at rest.
 	// Falls back to SecretKey-derived if unset in dev.
 	TokenEncryptionKey string `envconfig:"TOKEN_ENCRYPTION_KEY"`
+
+	// Public URL of THIS backend service. Used to build unsubscribe links
+	// embedded in outbound campaign emails. Defaults to localhost for dev.
+	PublicAPIURL string `envconfig:"PUBLIC_API_URL" default:"http://localhost:8000"`
+
+	// Tier-2 scraping fallback (free Jina Reader). Override only for a
+	// self-hosted Jina deployment.
+	JinaReaderBaseURL          string `envconfig:"JINA_READER_BASE_URL" default:"https://r.jina.ai"`
+	ScraperTier2ThresholdBytes int    `envconfig:"SCRAPER_TIER2_THRESHOLD_BYTES" default:"500"`
+
+	// Shared secret for /internal/* endpoints (Cloud Scheduler tick).
+	// Required in production. Falls back to SecretKey-derived in dev.
+	InternalAPIToken string `envconfig:"INTERNAL_API_TOKEN"`
 }
 
 // ParsedCORSOrigins returns CORS origins as a slice.

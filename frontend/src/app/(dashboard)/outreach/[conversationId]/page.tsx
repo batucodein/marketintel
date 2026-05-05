@@ -7,16 +7,19 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   getConversation,
+  getSenderProfile,
   sendMessage,
   draftReply,
   markConversationRead,
+  updateConversation,
 } from "@/lib/api/outreach";
-import type { Message } from "@/lib/types/outreach";
-import { ArrowLeft, Loader2, Send, Sparkles } from "lucide-react";
+import { useOutreachEvents } from "@/lib/sse/use-outreach-events";
+import type { Message, SenderProfile } from "@/lib/types/outreach";
+import { AutomationToggle, type AutomationLevel } from "@/components/outreach/automation-toggle";
+import { ArrowLeft, Loader2, Paperclip, Send, Sparkles } from "lucide-react";
 
 type PageProps = { params: Promise<{ conversationId: string }> };
 
@@ -25,8 +28,15 @@ export default function ConversationPage({ params }: PageProps) {
   const { data, isLoading, mutate } = useSWR(
     `/outreach/conversations/${conversationId}`,
     () => getConversation(conversationId),
-    { refreshInterval: 30000 },
+    { refreshInterval: 60000 },
   );
+
+  // Push: revalidate this conversation when an inbound for it arrives.
+  useOutreachEvents((e) => {
+    if (e.kind === "inbound" && e.conversation_id === conversationId) {
+      mutate();
+    }
+  });
 
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
@@ -34,6 +44,13 @@ export default function ConversationPage({ params }: PageProps) {
   const [sending, setSending] = useState(false);
   const [drafting, setDrafting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [attachCatalog, setAttachCatalog] = useState(true);
+
+  const { data: profile } = useSWR<SenderProfile>(
+    "/outreach/sender-profile",
+    () => getSenderProfile(),
+  );
+  const hasCatalog = Boolean(profile?.catalog_file_name && (profile?.catalog_size_bytes ?? 0) > 0);
 
   // On load: mark the conversation read and pre-fill compose from any pending draft.
   useEffect(() => {
@@ -74,6 +91,7 @@ export default function ConversationPage({ params }: PageProps) {
         draft_message_id: draftMsgID ?? undefined,
         subject: subject.trim(),
         body: body.trim(),
+        attach_catalog: hasCatalog && attachCatalog,
       });
       setBody("");
       setDraftMsgID(null);
@@ -105,7 +123,7 @@ export default function ConversationPage({ params }: PageProps) {
   const msgs = data.messages.filter((m) => m.status !== "pending_approval");
 
   return (
-    <div className="flex flex-col h-full max-h-[calc(100vh-180px)]">
+    <div className="flex flex-col h-[calc(100vh-180px)]">
       <div className="flex items-center gap-3 border-b border-border pb-3 mb-3">
         <Link href="/outreach">
           <Button variant="ghost" size="icon">
@@ -121,9 +139,17 @@ export default function ConversationPage({ params }: PageProps) {
             {data.messages.length !== 1 ? "s" : ""}
           </p>
         </div>
-        <Badge variant="outline" className="text-xs">
-          {data.conversation.automation}
-        </Badge>
+        <AutomationToggle
+          value={data.conversation.automation as AutomationLevel}
+          onChange={async (next) => {
+            try {
+              await updateConversation(conversationId, { automation: next });
+              mutate();
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Update failed");
+            }
+          }}
+        />
       </div>
 
       {error && (
@@ -171,10 +197,28 @@ export default function ConversationPage({ params }: PageProps) {
             onChange={(e) => setBody(e.target.value)}
             rows={8}
           />
-          <div className="flex justify-between items-center">
-            <p className="text-xs text-muted-foreground">
-              {draftMsgID ? "Editing an AI draft — your edits will be sent." : ""}
-            </p>
+          <div className="flex justify-between items-center gap-3">
+            <div className="flex flex-col gap-1 min-w-0">
+              {hasCatalog && (
+                <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={attachCatalog}
+                    onChange={(e) => setAttachCatalog(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-blue-600"
+                  />
+                  <Paperclip className="h-3.5 w-3.5" />
+                  <span className="truncate">
+                    Attach catalog ({profile?.catalog_file_name})
+                  </span>
+                </label>
+              )}
+              {draftMsgID && (
+                <p className="text-xs text-muted-foreground">
+                  Editing an AI draft — your edits will be sent.
+                </p>
+              )}
+            </div>
             <Button onClick={handleSend} disabled={sending}>
               {sending ? (
                 <Loader2 className="h-4 w-4 animate-spin mr-2" />

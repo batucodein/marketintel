@@ -49,6 +49,15 @@ func NewPipeline(
 	}
 }
 
+// ConfigureScraper wires the Tier-2 Jina fallback + the LLM-based
+// extractor onto the existing scraper. Called from main.go after the
+// AI router and config are built.
+func (p *Pipeline) ConfigureScraper(jinaBaseURL string, tier2Bytes int) {
+	if p.websiteScraper != nil {
+		p.websiteScraper.SetTier2(jinaBaseURL, tier2Bytes)
+	}
+}
+
 // --- Google Places verification ---
 
 // verifyWithGooglePlaces cross-matches Tendata businesses against Google Places

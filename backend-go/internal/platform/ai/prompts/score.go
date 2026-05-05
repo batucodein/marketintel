@@ -82,6 +82,17 @@ THEN apply data_completeness cap:
 - If data_completeness ≤ 0.4: cap overall_score at 60
 - If data_completeness ≤ 0.6: cap overall_score at 75
 
+## DIMENSION-LEVEL DATA QUALITY (CRITICAL)
+For EACH lead, the input includes a "field_availability" object listing which canonical fields the source upload actually carried for this row (e.g. {"consignee_email": false, "total_value_usd": true, ...}). You MUST emit a "dimension_completeness" object alongside the sub-scores indicating, per dimension, how much of that dimension's score is grounded in real data vs. inferred:
+
+- accessibility: depends on consignee_email, consignee_phone (and any contact_summary enrichment). If ALL of those are missing/false → dimension_completeness.accessibility ≤ 0.2 AND accessibility_score ≤ 30.
+- deal_size: depends on quantity, weight_kg, total_value_usd. If ALL are absent → dimension_completeness.deal_size ≤ 0.2.
+- fit: depends on hs_code, product_description, shipper_country. If all missing → dimension_completeness.fit ≤ 0.3.
+- urgency: depends on shipment_date. If absent → dimension_completeness.urgency ≤ 0.3.
+- purchase_likelihood: depends on transaction count derived from the input. If transaction_count = 1 with no other context → dimension_completeness.purchase_likelihood ≤ 0.4.
+
+You may NOT compensate for missing fields by inferring from name or industry. Be conservative.
+
 Always respond with valid JSON only, no markdown fences.`
 
 const scoreTemplate = `Score the following businesses as potential buyers for "%s" (HS Code: %s) from an exporter.
@@ -109,9 +120,11 @@ Also provide:
 - **weaknesses**: 1-3 specific weaknesses (cite data: "no email or website found", not "may be hard to reach")
 - **recommended_approach**: 1-2 sentence outreach strategy based on available contact channels
 - **data_completeness**: 0.0-1.0 — proportion of scoring based on actual provided data
+- **dimension_completeness**: object with keys deal_size, purchase_likelihood, accessibility, fit, urgency — each a 0.0-1.0 figure following the rules above
+- **missing_fields**: array of canonical-field keys that were absent in the input AND not filled by enrichment for this lead (e.g. ["consignee_email", "consignee_phone"])
 
 Respond as a JSON array:
-[{"id": "<business_id>", "deal_size_potential": 0, "purchase_likelihood": 0, "accessibility_score": 0, "fit_score": 0, "urgency_score": 0, "overall_score": 0, "scoring_rationale": "...", "strengths": [...], "weaknesses": [...], "recommended_approach": "...", "data_completeness": 0.0}, ...]`
+[{"id": "<business_id>", "deal_size_potential": 0, "purchase_likelihood": 0, "accessibility_score": 0, "fit_score": 0, "urgency_score": 0, "overall_score": 0, "scoring_rationale": "...", "strengths": [...], "weaknesses": [...], "recommended_approach": "...", "data_completeness": 0.0, "dimension_completeness": {"deal_size": 0.0, "purchase_likelihood": 0.0, "accessibility": 0.0, "fit": 0.0, "urgency": 0.0}, "missing_fields": []}, ...]`
 
 // ScoreBusiness represents a business to be scored.
 type ScoreBusiness struct {
@@ -129,6 +142,11 @@ type ScoreBusiness struct {
 	Description     string `json:"description,omitempty"`
 	ContactSummary  string `json:"contact_summary,omitempty"`  // all contact channels: extra emails, phones, whatsapp, social links
 	ShipmentContext string `json:"shipment_context,omitempty"` // customs/trade history summary
+	// FieldAvailability is the per-row presence map written by the
+	// dynamic Excel importer (input_field_presence) merged with whatever
+	// enrichment subsequently filled in. Drives the dimension_completeness
+	// caps the AI is required to honour.
+	FieldAvailability map[string]bool `json:"field_availability,omitempty"`
 }
 
 type ScorePrompt struct {

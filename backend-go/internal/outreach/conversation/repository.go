@@ -28,6 +28,7 @@ type Repository interface {
 
 	// Message ops
 	CreateMessage(ctx context.Context, m domain.Message) (*domain.Message, error)
+	GetMessage(ctx context.Context, id uuid.UUID) (*domain.Message, error)
 	ListMessages(ctx context.Context, conversationID uuid.UUID) ([]domain.Message, error)
 	FindByExternalID(ctx context.Context, externalID string) (*domain.Message, error)
 	DeletePendingDrafts(ctx context.Context, conversationID uuid.UUID) error
@@ -244,6 +245,27 @@ func (r *repository) CreateMessage(ctx context.Context, m domain.Message) (*doma
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
+	}
+	return &m, nil
+}
+
+func (r *repository) GetMessage(ctx context.Context, id uuid.UUID) (*domain.Message, error) {
+	var m domain.Message
+	err := r.pool.QueryRow(ctx,
+		`SELECT id, conversation_id, direction, channel_type, external_id, in_reply_to_external_id,
+		        subject, body_text, body_html, ai_generated, ai_model, ai_prompt_version,
+		        status, campaign_id, sequence_step_id, sent_at, received_at, created_at
+		 FROM messages WHERE id = $1`, id,
+	).Scan(
+		&m.ID, &m.ConversationID, &m.Direction, &m.ChannelType, &m.ExternalID, &m.InReplyToExternalID,
+		&m.Subject, &m.BodyText, &m.BodyHTML, &m.AIGenerated, &m.AIModel, &m.AIPromptVersion,
+		&m.Status, &m.CampaignID, &m.SequenceStepID, &m.SentAt, &m.ReceivedAt, &m.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scan message: %w", err)
 	}
 	return &m, nil
 }

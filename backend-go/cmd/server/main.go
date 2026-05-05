@@ -21,12 +21,19 @@ import (
 	"github.com/batuhan/marketintel/internal/discovery"
 	"github.com/batuhan/marketintel/internal/domain"
 	"github.com/batuhan/marketintel/internal/outreach"
+	outreachcampaign "github.com/batuhan/marketintel/internal/outreach/campaign"
 	outreachchannel "github.com/batuhan/marketintel/internal/outreach/channel"
 	gmailmailer "github.com/batuhan/marketintel/internal/outreach/channel/gmail"
+	outreachcompliance "github.com/batuhan/marketintel/internal/outreach/compliance"
 	outreachcontact "github.com/batuhan/marketintel/internal/outreach/contact"
 	outreachconv "github.com/batuhan/marketintel/internal/outreach/conversation"
+	outreachcrm "github.com/batuhan/marketintel/internal/outreach/crm"
+	outreachevents "github.com/batuhan/marketintel/internal/outreach/events"
+	"github.com/batuhan/marketintel/internal/outreach/internalsched"
+	outreachleadctx "github.com/batuhan/marketintel/internal/outreach/leadctx"
 	outreachpoller "github.com/batuhan/marketintel/internal/outreach/poller"
 	outreachsender "github.com/batuhan/marketintel/internal/outreach/sender"
+	outreachsequence "github.com/batuhan/marketintel/internal/outreach/sequence"
 	"github.com/batuhan/marketintel/internal/platform/ai"
 	"github.com/batuhan/marketintel/internal/platform/ailog"
 	"github.com/batuhan/marketintel/internal/platform/crypto"
@@ -150,7 +157,9 @@ func main() {
 	classifier := discovery.NewClassifier(aiRouter)
 	scorer := discovery.NewScorer(aiRouter)
 	pipeline := discovery.NewPipeline(aiRouter, places, classifier, scorer, discRepo)
-	discoveryHandler := discovery.NewHandler(pipeline, discRepo)
+	pipeline.ConfigureScraper(cfg.JinaReaderBaseURL, cfg.ScraperTier2ThresholdBytes)
+	mapper := discovery.NewAIMapper(aiRouter)
+	discoveryHandler := discovery.NewHandler(pipeline, discRepo, mapper)
 	scoringHandler := scoring.NewHandler(scoringRepo)
 
 	// Dashboard module
@@ -190,16 +199,74 @@ func main() {
 	convRepo := outreachconv.NewRepository(pool)
 	convService := outreachconv.NewService(convRepo, channelRepo, contactRepo, senderRepo, outreachchannel.DefaultRegistry, aiRouter, pool)
 	convHandler := outreachconv.NewHandler(convRepo, convService)
-	outreachHandler := outreach.NewHandler(senderHandler, contactHandler, channelHandler, convHandler)
 
-	// Start the Gmail inbox poller in the background (2-minute interval).
-	// Scales with user_channels rows; quick to swap for webhook push later.
-	pollerCtx, pollerCancel := context.WithCancel(context.Background())
-	defer pollerCancel()
-	go outreachpoller.NewPoller(channelRepo, outreachchannel.DefaultRegistry, convRepo, contactRepo, pool, 2*time.Minute).Run(pollerCtx)
+	// Shared lead-context loader — used by conversation, campaign drafter,
+	// and (P3) sequence engine to assemble prompt inputs.
+	leadCtxLoader := outreachleadctx.NewLoader(pool)
+
+	// Compliance — public unsubscribe handler + helpers used by senders.
+	complianceHandler := outreachcompliance.NewHandler(channelRepo, contactRepo)
+
+	// Campaigns (P2) — handler, drafter, scheduler.
+	campaignRepo := outreachcampaign.NewRepository(pool)
+	campaignSvc := outreachcampaign.NewService(
+		campaignRepo, channelRepo, contactRepo, senderRepo, convRepo,
+		outreachchannel.DefaultRegistry, aiRouter, leadCtxLoader, pool,
+		cfg.PublicAPIURL,
+	)
+	campaignHandler := outreachcampaign.NewHandler(campaignRepo, campaignSvc)
+
+	// Sequences (P3) — handler + engine.
+	sequenceRepo := outreachsequence.NewRepository(pool)
+	sequenceSvc := outreachsequence.NewService(sequenceRepo)
+	sequenceHandler := outreachsequence.NewHandler(sequenceRepo, sequenceSvc)
+	sequenceEngine := outreachsequence.NewEngine(
+		sequenceRepo, convRepo, contactRepo, channelRepo, senderRepo,
+		outreachchannel.DefaultRegistry, aiRouter, leadCtxLoader, pool,
+		cfg.PublicAPIURL,
+	)
+
+	// Bind the campaign service's sequence starter so that successful
+	// campaign sends kick off a follow-up run when sequence_id is set.
+	campaignSvc.SetSequenceStarter(sequenceSvc)
+
+	// CRM extras (P4) — tasks + notes.
+	crmRepo := outreachcrm.NewRepository(pool)
+	crmHandler := outreachcrm.NewHandler(crmRepo)
+
+	// Realtime SSE broker — poller publishes inbound events here.
+	eventBroker := outreachevents.NewBroker()
+	eventsHandler := outreachevents.NewHandler(eventBroker)
+
+	outreachHandler := outreach.NewHandler(senderHandler, contactHandler, channelHandler, convHandler, campaignHandler, sequenceHandler, crmHandler, eventsHandler, complianceHandler)
+
+	// Inbound poller — wrapped as a Tickable component instead of running as
+	// a long-lived goroutine. Cloud Scheduler drives the cadence in prod via
+	// POST /internal/scheduler/tick; locally a dev can hit the endpoint with
+	// the same INTERNAL_API_TOKEN, or curl /internal/scheduler/tick on demand.
+	mailPoller := outreachpoller.NewPoller(channelRepo, outreachchannel.DefaultRegistry, convRepo, contactRepo, eventBroker, pool, 2*time.Minute)
+
+	internalHandler := internalsched.NewHandler()
+	internalHandler.Register(&internalsched.PollerComponent{P: mailPoller})
+	internalHandler.Register(outreachcampaign.NewDrafter(campaignSvc))
+	internalHandler.Register(outreachcampaign.NewScheduler(campaignSvc))
+	internalHandler.Register(sequenceEngine)
+
+	internalToken := cfg.InternalAPIToken
+	if internalToken == "" {
+		// Dev fallback: derive from SecretKey so /internal/* still works locally
+		// without requiring an extra env var.
+		internalToken = "dev-" + cfg.SecretKey
+		slog.Info("INTERNAL_API_TOKEN not set — using dev fallback derived from SECRET_KEY")
+	}
 
 	// Server
-	srv := server.New(jwtMgr, userFetcher, authHandler, discoveryHandler, scoringHandler, dashboardHandler, outreachHandler, cfg.ParsedCORSOrigins())
+	srv := server.New(
+		jwtMgr, userFetcher,
+		authHandler, discoveryHandler, scoringHandler, dashboardHandler, outreachHandler,
+		internalHandler, internalToken,
+		cfg.ParsedCORSOrigins(),
+	)
 
 	httpSrv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
