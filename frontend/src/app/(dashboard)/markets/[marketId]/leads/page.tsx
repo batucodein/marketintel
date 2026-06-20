@@ -8,11 +8,13 @@ import type { Market } from "@/lib/types/market";
 import type { BusinessWithRelevance } from "@/lib/types/business";
 import { LeadTable } from "@/components/leads/lead-table";
 import { LeadDetailDrawer } from "@/components/leads/lead-detail-drawer";
+import { AddToContactGroupDialog } from "@/components/outreach/add-to-contact-group-dialog";
 import { PaginationControls } from "@/components/shared/pagination-controls";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
-import { AlertCircle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { AlertCircle, UserPlus } from "lucide-react";
 
 const PAGE_SIZE = 20;
 
@@ -21,6 +23,7 @@ export default function MarketLeadsPage() {
   const [page, setPage] = useState(1);
   const [minScore, setMinScore] = useState(0);
   const [selectedLead, setSelectedLead] = useState<BusinessWithRelevance | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
 
   const { data: market } = useSWR<Market>(
     `/markets/${marketId}`,
@@ -66,7 +69,15 @@ export default function MarketLeadsPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          <label className="text-xs text-muted-foreground whitespace-nowrap">Min Score</label>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!data?.leads?.length}
+            onClick={() => setAddOpen(true)}
+          >
+            <UserPlus className="h-3.5 w-3.5 mr-1.5" /> Add page to a contact group
+          </Button>
+          <label className="text-xs text-muted-foreground whitespace-nowrap ml-2">Min Score</label>
           <Input
             type="number"
             min={0}
@@ -80,6 +91,14 @@ export default function MarketLeadsPage() {
           />
         </div>
       </div>
+
+      <AddToContactGroupDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        businessIds={(data.leads ?? []).map((l) => l.id)}
+        defaultBrandId={market?.sender_profile_id ?? null}
+        onDone={() => mutate()}
+      />
 
       {!data.leads || data.leads.length === 0 ? (
         <EmptyState
@@ -103,7 +122,10 @@ export default function MarketLeadsPage() {
         </>
       )}
 
+      {/* key remounts the drawer per lead so edit-form state can never leak
+          from one lead onto another (stale-edit data corruption). */}
       <LeadDetailDrawer
+        key={selectedLead?.id ?? "none"}
         lead={selectedLead}
         marketId={marketId}
         onClose={() => setSelectedLead(null)}

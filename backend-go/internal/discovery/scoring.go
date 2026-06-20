@@ -37,11 +37,15 @@ func NewScorer(router *ai.Router) *Scorer {
 
 // ScoreBatch scores businesses in concurrent batches.
 // 60 leads / 8 per batch = 8 batches / 3 concurrent = ~3 rounds × ~3s = ~10 seconds.
+// senderProfile, when non-nil, is fed into the prompt so leads are ranked
+// against the user's specific positioning (target industries/countries,
+// deal-size band, deal breakers, moats) instead of just the market product.
 func (s *Scorer) ScoreBatch(
 	ctx context.Context,
 	businesses []domain.Business,
 	product domain.ProductContext,
 	marketCtx *domain.MarketContext,
+	senderProfile *domain.SenderProfile,
 ) ([]domain.LeadScore, error) {
 	if len(businesses) == 0 {
 		return nil, nil
@@ -70,7 +74,7 @@ func (s *Scorer) ScoreBatch(
 	for i, batch := range batches {
 		i, batch := i, batch
 		g.Go(func() error {
-			scores, err := s.scoreOne(gctx, batch, product, marketCtx)
+			scores, err := s.scoreOne(gctx, batch, product, marketCtx, senderProfile)
 			if err != nil {
 				slog.Error("scoring batch failed",
 					"batch_index", i,
@@ -107,6 +111,7 @@ func (s *Scorer) scoreOne(
 	batch []domain.Business,
 	product domain.ProductContext,
 	marketCtx *domain.MarketContext,
+	senderProfile *domain.SenderProfile,
 ) ([]domain.LeadScore, error) {
 	// Build prompt input
 	promptBiz := make([]prompts.ScoreBusiness, len(batch))
@@ -184,7 +189,23 @@ func (s *Scorer) scoreOne(
 		}
 	}
 
-	p := prompts.BuildScorePrompt(promptBiz, product.Query, product.HSCode, mktCtxStr, tradeCtxStr)
+	sp := prompts.SenderPositioning{}
+	if senderProfile != nil {
+		sp = prompts.SenderPositioning{
+			CompanyName:            senderProfile.CompanyName,
+			ProductDescription:     senderProfile.ProductDescription,
+			ValueProp:              senderProfile.ValueProp,
+			TargetBuyerDescription: senderProfile.TargetBuyerDescription,
+			TargetIndustries:       senderProfile.TargetIndustries,
+			TargetCountries:        senderProfile.TargetCountries,
+			AvoidCountries:         senderProfile.AvoidCountries,
+			MinDealSizeUSD:         senderProfile.MinDealSizeUSD,
+			TypicalDealSizeUSD:     senderProfile.TypicalDealSizeUSD,
+			DealBreakers:           senderProfile.DealBreakers,
+			CompetitiveMoats:       senderProfile.CompetitiveMoats,
+		}
+	}
+	p := prompts.BuildScorePrompt(promptBiz, product.Query, product.HSCode, mktCtxStr, tradeCtxStr, sp)
 
 	raw, aiResult, err := s.router.CompleteJSON(ctx, "scoring", p.Prompt, p.System, s.cacheTTL)
 	if err != nil {

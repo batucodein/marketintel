@@ -294,8 +294,19 @@ func (p *Pipeline) EnrichAndScore(
 		}
 	}
 
-	// Step 5: Scoring (marketCtx=nil since Comtrade is removed)
-	scores, err := p.scorer.ScoreBatch(ctx, businesses, product, nil)
+	// Step 5: Scoring (marketCtx=nil since Comtrade is removed). Load the
+	// user's sender profile so the scorer can rank leads against their
+	// specific positioning, not just the market product.
+	// TODO multi-brand scoring: a user can now have several brands (one per
+	// market). For now score against the Default brand so behavior is
+	// unchanged; a future pass can score against the market's assigned brand.
+	var senderProfile *domain.SenderProfile
+	if p.senders != nil {
+		if sp, err := p.senders.DefaultForUser(ctx, userID); err == nil {
+			senderProfile = sp
+		}
+	}
+	scores, err := p.scorer.ScoreBatch(ctx, businesses, product, nil, senderProfile)
 	if err != nil {
 		slog.Error("pipeline: scoring failed", "market_id", marketID, "error", err)
 	}

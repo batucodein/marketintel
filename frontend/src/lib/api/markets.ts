@@ -14,6 +14,17 @@ export function deleteMarket(marketId: string): Promise<void> {
   return apiFetch(`/markets/${marketId}`, { method: "DELETE" });
 }
 
+// assignBrandToMarket sets (or clears, with null) the market's fixed brand.
+export function assignBrandToMarket(
+  marketId: string,
+  senderProfileId: string | null,
+): Promise<void> {
+  return apiFetch(`/markets/${marketId}/brand`, {
+    method: "PATCH",
+    body: JSON.stringify({ sender_profile_id: senderProfileId }),
+  });
+}
+
 export function getMarketLeads(
   marketId: string,
   page = 1,

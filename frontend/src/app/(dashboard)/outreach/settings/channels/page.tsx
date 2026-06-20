@@ -1,46 +1,22 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useSearchParams } from "next/navigation";
+import { useState } from "react";
 import useSWR from "swr";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { listChannels, deleteChannel, setDefaultChannel, getGmailAuthURL } from "@/lib/api/outreach";
+import { listChannels, deleteChannel, setDefaultChannel } from "@/lib/api/outreach";
 import type { UserChannel } from "@/lib/types/outreach";
+import { ConnectEmailForm } from "@/components/outreach/connect-email-form";
 import { Loader2, Mail, Trash2, Star } from "lucide-react";
 
 export default function ChannelsPage() {
-  const searchParams = useSearchParams();
   const { data, mutate, isLoading } = useSWR<UserChannel[]>("/outreach/channels", () =>
     listChannels(),
   );
-  const [connecting, setConnecting] = useState(false);
-  const [banner, setBanner] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
-
-  useEffect(() => {
-    if (searchParams.get("connected") === "1") {
-      setBanner({ kind: "ok", text: "Gmail account connected." });
-    } else {
-      const err = searchParams.get("error");
-      if (err) setBanner({ kind: "error", text: "Connection failed: " + err });
-    }
-  }, [searchParams]);
-
-  async function handleConnect() {
-    setConnecting(true);
-    try {
-      const { auth_url } = await getGmailAuthURL();
-      window.location.href = auth_url;
-    } catch (e) {
-      setBanner({ kind: "error", text: e instanceof Error ? e.message : "Failed to start OAuth" });
-      setConnecting(false);
-    }
-  }
 
   async function handleDelete(id: string) {
-    if (!confirm("Disconnect this channel? Conversation history stays in your inbox; you can reconnect later by clicking Connect Gmail with the same account.")) return;
+    if (!confirm("Disconnect this mailbox? Conversation history stays in your account; you can reconnect it any time below.")) return;
     await deleteChannel(id);
     mutate();
   }
@@ -55,32 +31,14 @@ export default function ChannelsPage() {
       <div>
         <h1 className="text-2xl font-bold">Email channels</h1>
         <p className="text-sm text-muted-foreground">
-          Connect a Gmail account to send and receive emails from MarketIntel. More channels (Outlook, WhatsApp) will follow.
+          Connect any mailbox — your own domain, Gmail/Workspace, Outlook, Zoho, and more — over
+          IMAP/SMTP. Credentials are stored encrypted and your email never leaves your account.
         </p>
       </div>
 
-      {banner && (
-        <Alert variant={banner.kind === "error" ? "destructive" : "default"}>
-          <AlertDescription>{banner.text}</AlertDescription>
-        </Alert>
-      )}
-
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-base">Connected accounts</CardTitle>
-            <Button onClick={handleConnect} disabled={connecting}>
-              {connecting ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin mr-2" /> Redirecting…
-                </>
-              ) : (
-                <>
-                  <Mail className="h-4 w-4 mr-2" /> Connect Gmail
-                </>
-              )}
-            </Button>
-          </div>
+          <CardTitle className="text-base">Connected accounts</CardTitle>
         </CardHeader>
         <CardContent>
           {isLoading ? (
@@ -89,7 +47,7 @@ export default function ChannelsPage() {
             </div>
           ) : !data || data.length === 0 ? (
             <div className="text-sm text-muted-foreground py-8 text-center">
-              No channels connected yet. Click <b>Connect Gmail</b> to link your first account.
+              No mailbox connected yet. Use the form below to connect your first account.
             </div>
           ) : (
             <div className="space-y-2">
@@ -118,37 +76,46 @@ export default function ChannelsPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    {!ch.enabled ? (
-                      <Button size="sm" variant="outline" onClick={handleConnect}>
-                        Reconnect
-                      </Button>
-                    ) : (
-                      <>
-                        {!ch.is_default && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleSetDefault(ch.id)}
-                            title="Make default"
-                          >
-                            <Star className="h-4 w-4" />
-                          </Button>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleDelete(ch.id)}
-                          title="Disconnect (keeps history)"
-                        >
-                          <Trash2 className="h-4 w-4 text-red-600" />
-                        </Button>
-                      </>
+                    {!ch.enabled && (
+                      <span className="text-[11px] text-muted-foreground mr-1">
+                        reconnect below
+                      </span>
                     )}
+                    {ch.enabled && !ch.is_default && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleSetDefault(ch.id)}
+                        title="Make default"
+                      >
+                        <Star className="h-4 w-4" />
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleDelete(ch.id)}
+                      title="Disconnect (keeps history)"
+                    >
+                      <Trash2 className="h-4 w-4 text-red-600" />
+                    </Button>
                   </div>
                 </div>
               ))}
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Connect another email account</CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Your own domain or any provider, over IMAP/SMTP. We test the connection before saving.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <ConnectEmailForm onConnected={() => mutate()} />
         </CardContent>
       </Card>
     </div>

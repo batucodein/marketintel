@@ -1,13 +1,16 @@
 package conversation
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/batuhan/marketintel/internal/auth"
+	"github.com/batuhan/marketintel/internal/domain"
 	"github.com/batuhan/marketintel/internal/platform/httputil"
 )
 
@@ -30,7 +33,85 @@ func (h *Handler) Routes() chi.Router {
 	r.Post("/{id}/read", h.MarkRead)
 	r.Post("/{id}/messages", h.SendMessage)
 	r.Post("/{id}/draft", h.DraftReply)
+	r.Post("/{id}/draft/refine", h.RefineDraft)
+	r.Get("/{id}/tags", h.ListTags)
+	r.Post("/{id}/tags", h.AddTag)
+	r.Delete("/{id}/tags/{tag}", h.RemoveTag)
 	return r
+}
+
+// ListTags returns the conversation's intent tags.
+func (h *Handler) ListTags(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.ownConversation(w, r)
+	if !ok {
+		return
+	}
+	tags, err := h.repo.ListConvTags(r.Context(), id)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list tags")
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{"tags": tags})
+}
+
+// AddTag adds a manual intent tag (from the controlled vocabulary).
+func (h *Handler) AddTag(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.ownConversation(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Tag string `json:"tag"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if !domain.IsValidIntentTag(body.Tag) {
+		httputil.WriteError(w, http.StatusBadRequest, "unknown tag")
+		return
+	}
+	if err := h.repo.AddManualTag(r.Context(), id, body.Tag); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to add tag")
+		return
+	}
+	tags, _ := h.repo.ListConvTags(r.Context(), id)
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{"tags": tags})
+}
+
+// RemoveTag deletes a tag (ai or manual) from a conversation.
+func (h *Handler) RemoveTag(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.ownConversation(w, r)
+	if !ok {
+		return
+	}
+	tag := chi.URLParam(r, "tag")
+	if err := h.repo.RemoveTag(r.Context(), id, tag); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to remove tag")
+		return
+	}
+	tags, _ := h.repo.ListConvTags(r.Context(), id)
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{"tags": tags})
+}
+
+// ownConversation resolves + ownership-checks the {id} param. Writes the error
+// response and returns ok=false on failure.
+func (h *Handler) ownConversation(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid id")
+		return uuid.Nil, false
+	}
+	if _, err := h.repo.Get(r.Context(), user.ID, id); err != nil {
+		httputil.WriteError(w, http.StatusNotFound, "conversation not found")
+		return uuid.Nil, false
+	}
+	return id, true
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +314,49 @@ func (h *Handler) DraftReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msg, err := h.service.DraftReply(r.Context(), user.ID, id)
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, msg)
+}
+
+type refineDraftRequest struct {
+	DraftID     string `json:"draft_id"`
+	Instruction string `json:"instruction"`
+	// PreviousBody is the compose box's CURRENT text — the user's manual edits —
+	// so the AI revises what they see, not a stale stored draft.
+	PreviousBody string `json:"previous_body"`
+	Remember     bool   `json:"remember"`
+}
+
+// RefineDraft rewrites the current pending draft per the user's instruction.
+func (h *Handler) RefineDraft(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var req refineDraftRequest
+	if err := httputil.DecodeJSON(r, &req); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	draftID, err := uuid.Parse(req.DraftID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid draft_id")
+		return
+	}
+	if strings.TrimSpace(req.Instruction) == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "instruction is required")
+		return
+	}
+	msg, err := h.service.RefineDraft(r.Context(), user.ID, id, draftID, req.Instruction, req.PreviousBody, req.Remember)
 	if err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, err.Error())
 		return

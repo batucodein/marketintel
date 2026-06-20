@@ -14,13 +14,9 @@ import {
   listContactNotes,
   createContactNote,
   deleteContactNote,
-  listTasks,
-  createTask,
-  updateTask,
-  deleteTask,
 } from "@/lib/api/outreach";
-import type { Contact, Note, Task } from "@/lib/types/outreach";
-import { ArrowLeft, Loader2, Plus, Trash2, CheckCircle2 } from "lucide-react";
+import type { Contact, Note } from "@/lib/types/outreach";
+import { ArrowLeft, Loader2, Plus, Trash2 } from "lucide-react";
 
 const STAGES = ["lead", "contacted", "replied", "qualified", "won", "lost"] as const;
 type Stage = (typeof STAGES)[number];
@@ -38,13 +34,8 @@ export default function ContactDetailPage({ params }: PageProps) {
     `/outreach/contacts/${contactId}/notes`,
     () => listContactNotes(contactId),
   );
-  const { data: tasksData, mutate: refetchTasks } = useSWR(
-    `/outreach/tasks?contact=${contactId}`,
-    () => listTasks({ contact_id: contactId }),
-  );
 
   const [newNote, setNewNote] = useState("");
-  const [newTask, setNewTask] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -75,20 +66,6 @@ export default function ContactDetailPage({ params }: PageProps) {
       refetchNotes();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Add note failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function addTask() {
-    if (!newTask.trim()) return;
-    setBusy(true);
-    try {
-      await createTask({ title: newTask.trim(), contact_id: contactId });
-      setNewTask("");
-      refetchTasks();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Add task failed");
     } finally {
       setBusy(false);
     }
@@ -130,67 +107,7 @@ export default function ContactDetailPage({ params }: PageProps) {
         </Alert>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Tasks</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            <div className="flex gap-2">
-              <input
-                value={newTask}
-                onChange={(e) => setNewTask(e.target.value)}
-                placeholder="Quick task — Enter to add"
-                onKeyDown={(e) => e.key === "Enter" && addTask()}
-                className="flex-1 rounded-md border border-input bg-background px-3 h-9 text-sm"
-              />
-              <Button size="sm" onClick={addTask} disabled={busy}>
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
-            {(tasksData?.tasks ?? []).length === 0 ? (
-              <p className="text-sm text-muted-foreground">No tasks yet.</p>
-            ) : (
-              (tasksData?.tasks ?? []).map((t: Task) => (
-                <div key={t.id} className="flex items-center gap-2 px-1 group">
-                  <button
-                    onClick={async () => {
-                      await updateTask(t.id, {
-                        title: t.title,
-                        body: t.body,
-                        due_at: t.due_at,
-                        completed_at: t.completed_at ? null : new Date().toISOString(),
-                      });
-                      refetchTasks();
-                    }}
-                    title="Toggle complete"
-                  >
-                    <CheckCircle2
-                      className={`h-4 w-4 ${t.completed_at ? "text-green-600" : "text-muted-foreground"}`}
-                    />
-                  </button>
-                  <span
-                    className={`text-sm flex-1 ${t.completed_at ? "line-through text-muted-foreground" : ""}`}
-                  >
-                    {t.title}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="opacity-0 group-hover:opacity-100 h-6 w-6"
-                    onClick={async () => {
-                      await deleteTask(t.id);
-                      refetchTasks();
-                    }}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-              ))
-            )}
-          </CardContent>
-        </Card>
-
+      <div className="max-w-2xl">
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Notes</CardTitle>

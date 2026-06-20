@@ -43,6 +43,7 @@ type Service struct {
 	pool         *pgxpool.Pool
 	publicAPIURL string
 	sequenceStarter SequenceStarter
+	convRefiner     ConvDraftRefiner
 }
 
 // SetSequenceStarter is called from main.go after the sequence service is
@@ -77,27 +78,35 @@ func (s *Service) CreateCampaign(ctx context.Context, userID uuid.UUID, c domain
 	if c.Name == "" {
 		return nil, errors.New("campaign name is required")
 	}
+	// Validate a caller-provided channel (must be the user's + enabled), and
+	// fall back to auto-pick for any channel TYPE (gmail_oauth, smtp, …) — not
+	// just Gmail. A stale brand default / deleted channel resets to auto-pick.
+	if c.ChannelID != uuid.Nil {
+		if ch, err := s.channels.Get(ctx, userID, c.ChannelID); err != nil || ch == nil || !ch.Enabled {
+			c.ChannelID = uuid.Nil
+		}
+	}
 	if c.ChannelID == uuid.Nil {
 		chs, err := s.channels.List(ctx, userID)
 		if err != nil {
 			return nil, err
 		}
-		for _, ch := range chs {
-			if ch.Enabled && ch.Type == domain.ChannelTypeGmailOAuth && ch.IsDefault {
+		for _, ch := range chs { // prefer the default enabled account
+			if ch.Enabled && ch.IsDefault {
 				c.ChannelID = ch.ID
 				break
 			}
 		}
 		if c.ChannelID == uuid.Nil {
-			for _, ch := range chs {
-				if ch.Enabled && ch.Type == domain.ChannelTypeGmailOAuth {
+			for _, ch := range chs { // else any enabled account, any type
+				if ch.Enabled {
 					c.ChannelID = ch.ID
 					break
 				}
 			}
 		}
 		if c.ChannelID == uuid.Nil {
-			return nil, errors.New("no Gmail channel connected — connect one first")
+			return nil, errors.New("no email account connected — connect one in Settings → Email channels first")
 		}
 	}
 	c.UserID = userID
@@ -155,8 +164,11 @@ func (s *Service) AddContacts(ctx context.Context, userID, campaignID uuid.UUID,
 	}, nil
 }
 
-// ApproveContact flips one row from drafted → approved.
-// scheduled_send_at is computed at Launch, not here.
+// ApproveContact flips one row from drafted → approved. If the campaign
+// is already running (status=active), it also assigns a scheduled_send_at
+// at the next available pace slot — otherwise the row would have NULL
+// scheduled_send_at and the scheduler would never pick it up. Before
+// launch, scheduled_send_at stays NULL and Launch fills it in.
 func (s *Service) ApproveContact(ctx context.Context, userID, campaignID, contactID uuid.UUID) error {
 	camp, err := s.repo.Get(ctx, userID, campaignID)
 	if err != nil {
@@ -172,15 +184,80 @@ func (s *Service) ApproveContact(ctx context.Context, userID, campaignID, contac
 	if cc.Status != domain.CampaignContactDrafted {
 		return fmt.Errorf("can only approve drafted rows (status=%s)", cc.Status)
 	}
-	return s.repo.UpdateContactStatus(ctx, campaignID, contactID, domain.CampaignContactApproved, nil, nil)
+
+	var scheduledAt *time.Time
+	if camp.Status == domain.CampaignStatusActive {
+		t, err := s.nextPaceSlot(ctx, camp)
+		if err != nil {
+			return err
+		}
+		scheduledAt = &t
+	}
+	return s.repo.UpdateContactStatus(ctx, campaignID, contactID, domain.CampaignContactApproved, nil, scheduledAt)
+}
+
+// nextPaceSlot computes the next scheduled_send_at for a campaign that's
+// already running. Reads the latest scheduled_send_at across the
+// campaign's rows (sent + still-pending sends count, since pace is about
+// outbound rate not row order). Returns now if no slots assigned yet
+// (shouldn't happen for an active campaign but defensive).
+func (s *Service) nextPaceSlot(ctx context.Context, camp *domain.Campaign) (time.Time, error) {
+	pace := camp.SendPacePerDay
+	if pace <= 0 {
+		pace = 50
+	}
+	gap := time.Duration(86400/pace) * time.Second
+
+	var latest *time.Time
+	err := s.pool.QueryRow(ctx,
+		`SELECT MAX(scheduled_send_at) FROM campaign_contacts
+		 WHERE campaign_id = $1 AND scheduled_send_at IS NOT NULL`,
+		camp.ID,
+	).Scan(&latest)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read latest slot: %w", err)
+	}
+	now := time.Now().UTC()
+	if latest == nil || latest.Before(now) {
+		return now, nil
+	}
+	return latest.Add(gap), nil
 }
 
 // ApproveAll flips every drafted row in the campaign to approved.
+// If the campaign is already running, each newly-approved row gets the
+// next pace slot so they fire in order with the existing schedule.
 func (s *Service) ApproveAll(ctx context.Context, userID, campaignID uuid.UUID) (int, error) {
 	camp, err := s.repo.Get(ctx, userID, campaignID)
 	if err != nil {
 		return 0, err
 	}
+
+	// When active, schedule each newly-approved row at the next available
+	// slot one-by-one so pace is preserved across the batch.
+	if camp.Status == domain.CampaignStatusActive {
+		drafted, err := s.repo.ListContacts(ctx, camp.ID, domain.CampaignContactDrafted)
+		if err != nil {
+			return 0, err
+		}
+		pace := camp.SendPacePerDay
+		if pace <= 0 {
+			pace = 50
+		}
+		gap := time.Duration(86400/pace) * time.Second
+		base, err := s.nextPaceSlot(ctx, camp)
+		if err != nil {
+			return 0, err
+		}
+		for i, row := range drafted {
+			t := base.Add(gap * time.Duration(i))
+			if err := s.repo.UpdateContactStatus(ctx, camp.ID, row.ContactID, domain.CampaignContactApproved, nil, &t); err != nil {
+				return i, err
+			}
+		}
+		return len(drafted), nil
+	}
+
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE campaign_contacts SET status = 'approved'
 		 WHERE campaign_id = $1 AND status = 'drafted'`,
@@ -203,8 +280,8 @@ func (s *Service) Launch(ctx context.Context, userID, campaignID uuid.UUID) erro
 		return fmt.Errorf("can't launch campaign in status %s", camp.Status)
 	}
 
-	// Compliance gate: physical address required.
-	sp, _ := s.sender.Get(ctx, userID)
+	// Compliance gate: physical address required (on the campaign's brand).
+	sp, _ := s.resolveBrand(ctx, camp)
 	if sp == nil || sp.PhysicalAddress == "" {
 		return errors.New("sender profile is missing a physical address — required by CAN-SPAM/GDPR for bulk sending")
 	}
@@ -239,12 +316,158 @@ func (s *Service) Launch(ctx context.Context, userID, campaignID uuid.UUID) erro
 	return s.repo.UpdateStatus(ctx, userID, campaignID, domain.CampaignStatusActive, &startedAt, nil)
 }
 
+// Pause halts the whole group — cold sends (the scheduler gates on
+// status='active') AND follow-ups (the sequence engine's DueRuns excludes
+// non-active campaigns). paused_at records when, so Resume can "thaw" correctly.
 func (s *Service) Pause(ctx context.Context, userID, campaignID uuid.UUID) error {
-	return s.repo.UpdateStatus(ctx, userID, campaignID, domain.CampaignStatusPaused, nil, nil)
+	_, err := s.pool.Exec(ctx,
+		`UPDATE campaigns SET status='paused', paused_at=now(), updated_at=now()
+		  WHERE id=$1 AND user_id=$2 AND status='active'`, campaignID, userID)
+	return err
 }
 
+// Resume "thaws" a paused group: it shifts every pending scheduled cold send AND
+// every active follow-up run FORWARD by exactly how long the group was paused, so
+// nothing fires retroactively (no burst) and the original spacing is preserved —
+// the group continues exactly where it left off.
 func (s *Service) Resume(ctx context.Context, userID, campaignID uuid.UUID) error {
-	return s.repo.UpdateStatus(ctx, userID, campaignID, domain.CampaignStatusActive, nil, nil)
+	var pausedAt *time.Time
+	if err := s.pool.QueryRow(ctx,
+		`SELECT paused_at FROM campaigns WHERE id=$1 AND user_id=$2`, campaignID, userID,
+	).Scan(&pausedAt); err != nil {
+		return err
+	}
+
+	deltaSecs := 0.0
+	if pausedAt != nil {
+		if d := time.Since(*pausedAt).Seconds(); d > 0 {
+			deltaSecs = d
+		}
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Shift unsent cold sends forward by the pause duration.
+	if _, err := tx.Exec(ctx,
+		`UPDATE campaign_contacts
+		    SET scheduled_send_at = scheduled_send_at + make_interval(secs => $2)
+		  WHERE campaign_id=$1 AND status='approved' AND scheduled_send_at IS NOT NULL`,
+		campaignID, deltaSecs); err != nil {
+		return fmt.Errorf("shift cold schedule: %w", err)
+	}
+	// Shift active follow-up runs for this group's conversations.
+	if _, err := tx.Exec(ctx,
+		`UPDATE sequence_runs
+		    SET next_run_at = next_run_at + make_interval(secs => $2), updated_at=now()
+		  WHERE status='active'
+		    AND conversation_id IN (SELECT id FROM conversations WHERE campaign_id=$1)`,
+		campaignID, deltaSecs); err != nil {
+		return fmt.Errorf("shift follow-up runs: %w", err)
+	}
+	// Reactivate.
+	if _, err := tx.Exec(ctx,
+		`UPDATE campaigns SET status='active', paused_at=NULL, updated_at=now()
+		  WHERE id=$1 AND user_id=$2`, campaignID, userID); err != nil {
+		return fmt.Errorf("reactivate campaign: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// RetryFailed flips every status='failed' row back to 'approved' and
+// re-assigns a scheduled_send_at at the next pace slot, so failed sends
+// (typically caused by a revoked OAuth token that's now been reconnected)
+// can fire on the next scheduler tick. Returns the number of rows retried.
+func (s *Service) RetryFailed(ctx context.Context, userID, campaignID uuid.UUID) (int, error) {
+	camp, err := s.repo.Get(ctx, userID, campaignID)
+	if err != nil {
+		return 0, err
+	}
+
+	failed, err := s.repo.ListContacts(ctx, camp.ID, domain.CampaignContactFailed)
+	if err != nil {
+		return 0, err
+	}
+	if len(failed) == 0 {
+		return 0, nil
+	}
+
+	pace := camp.SendPacePerDay
+	if pace <= 0 {
+		pace = 50
+	}
+	gap := time.Duration(86400/pace) * time.Second
+	base, err := s.nextPaceSlot(ctx, camp)
+	if err != nil {
+		return 0, err
+	}
+	for i, row := range failed {
+		t := base.Add(gap * time.Duration(i))
+		if err := s.repo.UpdateContactStatus(ctx, camp.ID, row.ContactID, domain.CampaignContactApproved, nil, &t); err != nil {
+			return i, err
+		}
+		// Clear the old failure note so the UI doesn't keep showing
+		// "Send failed: <token revoked>" alongside the new pending send.
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE campaign_contacts SET skip_reason = NULL WHERE campaign_id = $1 AND contact_id = $2`,
+			camp.ID, row.ContactID,
+		); err != nil {
+			return i, err
+		}
+	}
+
+	// If the campaign was stopped earlier, flip it back to active so the
+	// scheduler will pick the rows up.
+	if camp.Status == domain.CampaignStatusStopped {
+		_ = s.repo.UpdateStatus(ctx, userID, campaignID, domain.CampaignStatusActive, nil, nil)
+	}
+	return len(failed), nil
+}
+
+// UpdateDraft persists user edits to a campaign_contact's pending draft.
+// Loads the linked draft_message_id, verifies ownership (the campaign
+// belongs to userID) and verifies the message is still editable (status
+// in 'draft' or 'pending_approval'), then updates messages.subject +
+// messages.body_text in place.
+func (s *Service) UpdateDraft(ctx context.Context, userID, campaignID, contactID uuid.UUID, subject, body string) error {
+	camp, err := s.repo.Get(ctx, userID, campaignID)
+	if err != nil {
+		return err
+	}
+	if camp == nil {
+		return domain.ErrNotFound
+	}
+	cc, err := s.repo.GetContact(ctx, campaignID, contactID)
+	if err != nil {
+		return err
+	}
+	if cc.DraftMessageID == nil {
+		return errors.New("no draft to edit — campaign hasn't drafted this contact yet")
+	}
+	// Status gate on the campaign_contacts row: only drafted rows are
+	// editable. Approved/sent flow out of user control.
+	if cc.Status != domain.CampaignContactDrafted {
+		return fmt.Errorf("can't edit a %s draft", cc.Status)
+	}
+	// Status gate on the message: must still be a draft / pending_approval.
+	// (DraftMessageID points to messages.id by FK so the row exists.)
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE messages
+		   SET subject = $1, body_text = $2
+		 WHERE id = $3
+		   AND status IN ('draft', 'pending_approval')`,
+		subject, body, *cc.DraftMessageID,
+	)
+	if err != nil {
+		return fmt.Errorf("update draft: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("draft is no longer editable (already approved or sent)")
+	}
+	return nil
 }
 
 func (s *Service) Stop(ctx context.Context, userID, campaignID uuid.UUID) error {
@@ -270,4 +493,28 @@ func (s *Service) parsePositioning(camp *domain.Campaign) *PositioningOverride {
 		return nil
 	}
 	return &p
+}
+
+// resolveBrand returns the sender profile (brand) a campaign sends as. Uses
+// the campaign's assigned SenderProfileID when set, falling back to the
+// user's Default brand for legacy campaigns created before per-market brands.
+func (s *Service) resolveBrand(ctx context.Context, camp *domain.Campaign) (*domain.SenderProfile, error) {
+	if camp != nil && camp.SenderProfileID != nil {
+		sp, err := s.sender.GetByID(ctx, camp.UserID, *camp.SenderProfileID)
+		if err == nil {
+			return sp, nil
+		}
+		// Fall through to default if the assigned brand was deleted.
+	}
+	return s.sender.DefaultForUser(ctx, camp.UserID)
+}
+
+// CatalogForCampaign returns the catalog bytes for a campaign's brand (or the
+// default brand). Used by the scheduler when attaching a catalog at send time.
+func (s *Service) CatalogForCampaign(ctx context.Context, camp *domain.Campaign) (filename, mimeType string, data []byte, err error) {
+	sp, err := s.resolveBrand(ctx, camp)
+	if err != nil || sp == nil {
+		return "", "", nil, domain.ErrNotFound
+	}
+	return s.sender.GetCatalogData(ctx, sp.ID)
 }

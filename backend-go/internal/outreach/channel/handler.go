@@ -21,18 +21,20 @@ import (
 
 // Handler serves /outreach/channels/* endpoints.
 type Handler struct {
-	repo         Repository
-	gmail        *oauth.GmailOAuth
-	cipher       *crypto.Cipher
-	oauthState   *stateStore // short-lived CSRF state for OAuth round-trip
-	frontendURL  string      // where to redirect back after OAuth success
+	repo        Repository
+	gmail       *oauth.GmailOAuth
+	cipher      *crypto.Cipher
+	connector   EmailConnector // validates + encrypts generic IMAP/SMTP mailboxes
+	oauthState  *stateStore    // short-lived CSRF state for OAuth round-trip
+	frontendURL string         // where to redirect back after OAuth success
 }
 
-func NewHandler(repo Repository, gmail *oauth.GmailOAuth, cipher *crypto.Cipher, frontendURL string) *Handler {
+func NewHandler(repo Repository, gmail *oauth.GmailOAuth, cipher *crypto.Cipher, connector EmailConnector, frontendURL string) *Handler {
 	return &Handler{
 		repo:        repo,
 		gmail:       gmail,
 		cipher:      cipher,
+		connector:   connector,
 		oauthState:  newStateStore(),
 		frontendURL: frontendURL,
 	}
@@ -46,7 +48,134 @@ func (h *Handler) Routes() chi.Router {
 	r.Delete("/{id}", h.Delete)
 	r.Post("/{id}/default", h.SetDefault)
 	r.Get("/gmail/auth-url", h.GmailAuthURL)
+	r.Post("/email/detect", h.DetectEmail)
+	r.Post("/email", h.ConnectEmail)
 	return r
+}
+
+// DetectEmail returns suggested IMAP/SMTP settings for an email address, used to
+// prefill the connect form.
+func (h *Handler) DetectEmail(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromContext(r.Context()) == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := httputil.DecodeJSON(r, &body); err != nil || body.Email == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "email is required")
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, SuggestEmailSettings(body.Email))
+}
+
+// ConnectEmail validates an IMAP/SMTP mailbox (tests the connection) and persists
+// it as an encrypted channel. Re-connect updates an existing same-email channel.
+func (h *Handler) ConnectEmail(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if h.connector == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "email connect not configured")
+		return
+	}
+	var body struct {
+		Email        string `json:"email"`
+		Password     string `json:"password"`
+		Username     string `json:"username"`
+		IMAPHost     string `json:"imap_host"`
+		IMAPPort     int    `json:"imap_port"`
+		SMTPHost     string `json:"smtp_host"`
+		SMTPPort     int    `json:"smtp_port"`
+		Security     string `json:"security"`
+		DisplayLabel string `json:"display_label"`
+	}
+	if err := httputil.DecodeJSON(r, &body); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if body.Email == "" || body.Password == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "email and password are required")
+		return
+	}
+
+	// Fill missing transport settings from autodiscovery; username defaults to email.
+	sug := SuggestEmailSettings(body.Email)
+	cfg := SMTPConfig{
+		IMAPHost: firstNonEmpty(body.IMAPHost, sug.IMAPHost),
+		IMAPPort: firstNonZero(body.IMAPPort, sug.IMAPPort),
+		SMTPHost: firstNonEmpty(body.SMTPHost, sug.SMTPHost),
+		SMTPPort: firstNonZero(body.SMTPPort, sug.SMTPPort),
+		Username: firstNonEmpty(body.Username, body.Email),
+		Password: body.Password,
+		Security: firstNonEmpty(body.Security, sug.Security),
+	}
+
+	// Verify credentials before storing anything.
+	if err := h.connector.Test(r.Context(), cfg); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "Couldn't connect: "+err.Error())
+		return
+	}
+	enc, err := h.connector.EncodeConfig(cfg)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to secure credentials")
+		return
+	}
+
+	label := body.DisplayLabel
+	if label == "" {
+		label = body.Email
+	}
+
+	// Upsert by from_email (re-connect updates the existing channel's config).
+	existing, gerr := h.repo.GetByFromEmail(r.Context(), user.ID, body.Email)
+	if gerr == nil {
+		if err := h.repo.UpdateConfig(r.Context(), existing.ID, enc); err != nil {
+			httputil.WriteError(w, http.StatusInternalServerError, "failed to update channel")
+			return
+		}
+		httputil.WriteJSON(w, http.StatusOK, map[string]any{"id": existing.ID, "reconnected": true})
+		return
+	} else if !errors.Is(gerr, domain.ErrNotFound) {
+		httputil.WriteError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+
+	created, err := h.repo.Create(r.Context(), domain.UserChannel{
+		UserID:       user.ID,
+		Type:         domain.ChannelTypeSMTP,
+		DisplayLabel: label,
+		FromEmail:    body.Email,
+		ConfigCipher: enc,
+		Enabled:      true,
+		IsDefault:    false,
+	})
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to save channel")
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{"id": created.ID})
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func firstNonZero(vals ...int) int {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 // PublicRoutes returns the routes that must NOT be behind auth middleware.

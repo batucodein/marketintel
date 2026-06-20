@@ -23,12 +23,21 @@ import (
 //   - one AI call per business batch for scoring
 //   - one AI call for cross-matching Tendata names to Google Places
 // All AI prompts inherit the NoHallucinationPreamble.
+// SenderProfileLoader returns the user's default sender profile (brand),
+// used by the scorer to rank leads against the user's positioning. Defined
+// here as an interface (rather than importing outreach/sender) to avoid
+// a discovery → outreach package cycle.
+type SenderProfileLoader interface {
+	DefaultForUser(ctx context.Context, userID uuid.UUID) (*domain.SenderProfile, error)
+}
+
 type Pipeline struct {
 	router         *ai.Router
 	places         domain.BusinessFinder
 	classifier     *Classifier
 	scorer         *Scorer
 	repo           Repository
+	senders        SenderProfileLoader
 	websiteScraper *datasource.WebsiteScraper
 }
 
@@ -47,6 +56,12 @@ func NewPipeline(
 		repo:           repo,
 		websiteScraper: datasource.NewWebsiteScraper(),
 	}
+}
+
+// SetSenderLoader binds the sender-profile lookup so scoring can use the
+// user's positioning. Called from main.go after wiring outreach.
+func (p *Pipeline) SetSenderLoader(loader SenderProfileLoader) {
+	p.senders = loader
 }
 
 // ConfigureScraper wires the Tier-2 Jina fallback + the LLM-based

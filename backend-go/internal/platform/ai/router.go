@@ -39,9 +39,16 @@ func DefaultTasks() map[string]TaskConfig {
 		"crossmatch":      {Provider: "azure_openai", Model: "gpt-5.4-nano", Temperature: 0.0, MaxTokens: 2048},
 		"outreach_draft":     {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.4, MaxTokens: 2048},
 		"outreach_reply":     {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.3, MaxTokens: 2048},
-		"outreach_sentiment": {Provider: "azure_openai", Model: "gpt-5.4-nano", Temperature: 0.0, MaxTokens: 256},
+		"outreach_sentiment": {Provider: "azure_openai", Model: "gpt-5.4-nano", Temperature: 0.0, MaxTokens: 512},
+		// Group draft assistant: conversational turn that answers questions about
+		// drafts + proposes standing directives (the user confirms before apply).
+		"assistant_chat": {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.3, MaxTokens: 1024},
 		"excel_mapping":      {Provider: "azure_openai", Model: "gpt-5.4-nano", Temperature: 0.1, MaxTokens: 2048},
 		"website_extract":    {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.1, MaxTokens: 2048},
+		// Simulation lab: buyer-persona roleplay + transcript judge. Same tier
+		// as drafting so persona realism matches what real recipients see.
+		"simulation_buyer_persona": {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.6, MaxTokens: 1024},
+		"simulation_judge":         {Provider: "azure_openai", Model: "gpt-5.4-mini", Temperature: 0.1, MaxTokens: 1024},
 	}
 }
 

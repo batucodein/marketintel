@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/batuhan/marketintel/internal/domain"
+	"github.com/batuhan/marketintel/internal/outreach/conversation"
 	"github.com/batuhan/marketintel/internal/outreach/internalsched"
 	"github.com/batuhan/marketintel/internal/platform/ai"
 	"github.com/batuhan/marketintel/internal/platform/ai/prompts"
@@ -63,7 +64,7 @@ func (d *Drafter) draftOne(ctx context.Context, row CampaignContactWithCampaign)
 		return d.svc.repo.UpdateContactSkipped(ctx, row.CampaignID, row.ContactID, "contact unsubscribed")
 	}
 
-	sp, _ := d.svc.sender.Get(ctx, camp.UserID)
+	sp, _ := d.svc.resolveBrand(ctx, &camp)
 	if sp == nil {
 		sp = &domain.SenderProfile{UserID: camp.UserID, Tone: "formal"}
 	}
@@ -103,29 +104,32 @@ func (d *Drafter) draftOne(ctx context.Context, row CampaignContactWithCampaign)
 		positioning = camp.Goal
 	}
 
-	prompt := prompts.BuildOutreachDraftPrompt(prompts.OutreachDraftInput{
-		SenderProfileJSON:   prompts.EncodeJSON(sp),
-		CampaignPositioning: positioning,
-		ContactJSON:         prompts.EncodeJSON(c),
-		BusinessJSON:        businessJSON,
-		ShipmentContext:     shipmentCtx,
-		LeadScoreJSON:       leadScoreJSON,
-		HasCatalog:          hasCatalog,
-		CatalogFilename:     catalogName,
-	})
+	// Pull prior conversations the user has had with this contact across
+	// any campaign/channel. If any exist, the draft will be a warm
+	// re-engage rather than a cold first touch.
+	priorBlock := ""
+	threads, terr := d.svc.conversation.ListByContact(ctx, camp.UserID, c.ID, 5, 10)
+	if terr == nil && len(threads) > 0 {
+		priorBlock = conversation.RenderPriorConversations(threads, time.Now())
+	}
 
-	ctxAI := ai.WithUserID(ctx, camp.UserID)
-	raw, _, err := d.svc.ai.CompleteJSON(ctxAI, "outreach_draft", prompt.Prompt, prompt.System, 30*time.Minute)
+	in := prompts.OutreachDraftInput{
+		SenderProfileJSON:         prompts.EncodeJSON(sp),
+		CampaignPositioning:       positioning,
+		ContactJSON:               prompts.EncodeJSON(c),
+		BusinessJSON:              businessJSON,
+		ShipmentContext:           shipmentCtx,
+		LeadScoreJSON:             leadScoreJSON,
+		PriorConversationsContext: priorBlock,
+		HasCatalog:                hasCatalog,
+		CatalogFilename:           catalogName,
+	}
+	out, err := d.draftWithRetry(ctx, camp.UserID, in)
 	if err != nil {
-		return fmt.Errorf("ai draft: %w", err)
+		return err
 	}
-	var out prompts.OutreachDraftResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return fmt.Errorf("parse ai draft: %w", err)
-	}
-	if out.Subject == "" || out.Body == "" {
-		return fmt.Errorf("ai returned empty subject/body")
-	}
+	// Guarantee the brand signature is present (the model is inconsistent).
+	out.Body = prompts.WithSignature(out.Body, sp.Signature)
 
 	// Pre-create a paused conversation so the FK on messages.conversation_id
 	// resolves. The scheduler unpauses it when it actually sends.
@@ -139,8 +143,8 @@ func (d *Drafter) draftOne(ctx context.Context, row CampaignContactWithCampaign)
 	if _, err = d.svc.pool.Exec(ctx,
 		`INSERT INTO messages (id, conversation_id, direction, channel_type, subject,
 		                       body_text, ai_generated, ai_prompt_version, status, campaign_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8, $9)`,
-		msgID, convID, domain.DirectionOutbound, domain.ChannelTypeGmailOAuth,
+		 VALUES ($1, $2, $3, (SELECT channel_type FROM conversations WHERE id = $2), $4, $5, true, $6, $7, $8)`,
+		msgID, convID, domain.DirectionOutbound,
 		out.Subject, out.Body, promptV, domain.MessageStatusDraft, camp.ID,
 	); err != nil {
 		return fmt.Errorf("insert draft message: %w", err)
@@ -164,7 +168,8 @@ func (d *Drafter) preCreateConversation(ctx context.Context, camp domain.Campaig
 	_, err := d.svc.pool.Exec(ctx,
 		`INSERT INTO conversations (id, user_id, contact_id, channel_id, campaign_id,
 		                            channel_type, automation, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, 'manual', 'paused')`,
+		 VALUES ($1, $2, $3, $4, $5,
+		         COALESCE((SELECT type FROM user_channels WHERE id = $4), $6), 'manual', 'paused')`,
 		convID, camp.UserID, c.ID, camp.ChannelID, camp.ID, domain.ChannelTypeGmailOAuth,
 	)
 	if err != nil {
@@ -173,8 +178,57 @@ func (d *Drafter) preCreateConversation(ctx context.Context, camp domain.Campaig
 	return convID, nil
 }
 
-// senderCatalogIfPresent re-implements the same gate used by single-send so
-// the campaign drafter doesn't need to import conversation pkg.
+// draftWithRetry runs one AI completion, validates output with the
+// prompt-side guard, and re-runs once with StricterRetry=true if the
+// first pass tripped any forbidden-pattern or catalog-hedge violation.
+// On retry failure we fall back to the first attempt rather than dropping
+// the row entirely — a slightly off-brand email is better than no email.
+func (d *Drafter) draftWithRetry(ctx context.Context, userID uuid.UUID, in prompts.OutreachDraftInput) (*prompts.OutreachDraftResult, error) {
+	first, err := d.draftOnce(ctx, userID, in)
+	if err != nil {
+		return nil, err
+	}
+	mode := prompts.DraftModeCold
+	if in.PriorConversationsContext != "" {
+		mode = prompts.DraftModeReply
+	}
+	violations := prompts.ValidateOutreachBody(first.Body, in.HasCatalog, mode)
+	if len(violations) == 0 {
+		return first, nil
+	}
+	slog.Warn("campaign drafter: guard violations, retrying",
+		"violations", violations, "subject", first.Subject,
+	)
+	in.StricterRetry = true
+	second, err := d.draftOnce(ctx, userID, in)
+	if err != nil {
+		return first, nil
+	}
+	return second, nil
+}
+
+func (d *Drafter) draftOnce(ctx context.Context, userID uuid.UUID, in prompts.OutreachDraftInput) (*prompts.OutreachDraftResult, error) {
+	prompt := prompts.BuildOutreachDraftPrompt(in)
+	ctxAI := ai.WithUserID(ctx, userID)
+	raw, _, err := d.svc.ai.CompleteJSON(ctxAI, "outreach_draft", prompt.Prompt, prompt.System, 30*time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("ai draft: %w", err)
+	}
+	var out prompts.OutreachDraftResult
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("parse draft JSON: %w", err)
+	}
+	if out.Subject == "" || out.Body == "" {
+		return nil, fmt.Errorf("empty subject or body in draft")
+	}
+	return &out, nil
+}
+
+// senderCatalogIfPresent re-implements the same gate used by single-send.
+// Confirms a catalog file is actually present on the sender profile —
+// AttachCatalog=true on the campaign without an uploaded file silently
+// downgrades to "no catalog" so the prompt doesn't promise an attachment
+// that won't be there at send time.
 func senderCatalogIfPresent(sp *domain.SenderProfile) (bool, string) {
 	if sp == nil || sp.CatalogFileName == nil || *sp.CatalogFileName == "" {
 		return false, ""

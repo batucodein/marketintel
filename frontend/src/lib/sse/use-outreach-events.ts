@@ -6,7 +6,7 @@ import { getAccessToken } from "@/lib/api/client";
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export interface OutreachEvent {
-  kind: "inbound" | "conversation_read" | "campaign_progress";
+  kind: "inbound" | "conversation_read" | "campaign_progress" | "simulation_progress";
   conversation_id?: string;
   campaign_id?: string;
   at: string;
@@ -46,6 +46,7 @@ export function useOutreachEvents(onEvent: (e: OutreachEvent) => void) {
     es.addEventListener("inbound", handle);
     es.addEventListener("conversation_read", handle);
     es.addEventListener("campaign_progress", handle);
+    es.addEventListener("simulation_progress", handle);
 
     es.onerror = () => {
       // Browser will retry automatically. Nothing to do.

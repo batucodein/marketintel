@@ -95,9 +95,9 @@ func (s *Service) StartCampaignRun(ctx context.Context, sequenceID, conversation
 
 // CreateSequenceInput is the request body shape for POST /sequences.
 type CreateSequenceInput struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	IsTemplate  bool                   `json:"is_template"`
+	Name        string                `json:"name"`
+	Description string                `json:"description"`
+	IsTemplate  bool                  `json:"is_template"`
 	Steps       []domain.SequenceStep `json:"steps"`
 }
 

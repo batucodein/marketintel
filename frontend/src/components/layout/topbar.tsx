@@ -10,7 +10,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Badge } from "@/components/ui/badge";
 import { User, LogOut, Settings, Menu } from "lucide-react";
 
 interface TopbarProps {
@@ -36,12 +35,6 @@ export function Topbar({ onMenuClick }: TopbarProps) {
       </div>
 
       <div className="flex items-center gap-4">
-        {user && (
-          <Badge variant="outline" className="text-xs">
-            {user.api_calls_remaining} API calls
-          </Badge>
-        )}
-
         <DropdownMenu>
           <DropdownMenuTrigger className="inline-flex items-center justify-center rounded-lg p-2 hover:bg-muted cursor-pointer outline-none">
             <User className="h-5 w-5" />

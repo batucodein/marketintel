@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -97,7 +98,7 @@ func (s *Scheduler) sendOne(ctx context.Context, row CampaignContactWithCampaign
 	if err != nil {
 		return fmt.Errorf("build unsubscribe url: %w", err)
 	}
-	sp, _ := s.svc.sender.Get(ctx, camp.UserID)
+	sp, _ := s.svc.resolveBrand(ctx, &camp)
 	addr := ""
 	if sp != nil {
 		addr = sp.PhysicalAddress
@@ -111,9 +112,9 @@ func (s *Scheduler) sendOne(ctx context.Context, row CampaignContactWithCampaign
 		UnsubscribeURL: unsubURL,
 	}
 
-	// Optional catalog attachment.
+	// Optional catalog attachment (from the campaign's brand).
 	if camp.AttachCatalog {
-		fname, mimeType, data, err := s.svc.sender.GetCatalogData(ctx, camp.UserID)
+		fname, mimeType, data, err := s.svc.CatalogForCampaign(ctx, &camp)
 		if err == nil && len(data) > 0 {
 			sendReq.Attachments = []channel.Attachment{{
 				Filename: fname, MimeType: mimeType, Data: data,
@@ -123,6 +124,26 @@ func (s *Scheduler) sendOne(ctx context.Context, row CampaignContactWithCampaign
 
 	result, err := ch.Send(ctx, sendReq)
 	if err != nil {
+		// Persist the failure so the campaign UI can show it and the
+		// scheduler stops retrying every tick. The user can decide what
+		// to do (reconnect channel, manually retry later, etc.).
+		_ = s.svc.repo.UpdateContactStatus(ctx, row.CampaignID, row.ContactID, domain.CampaignContactFailed, nil, nil)
+		_, _ = s.svc.pool.Exec(ctx,
+			`UPDATE campaign_contacts SET skip_reason = $1 WHERE campaign_id = $2 AND contact_id = $3`,
+			truncErr(err), row.CampaignID, row.ContactID,
+		)
+		// If Google says the OAuth grant is gone, the channel is dead
+		// until the user reconnects. Flip the row so the UI's channels
+		// page surfaces "Disconnected — Reconnect" and the inbound
+		// poller stops hammering Gmail with 400s.
+		if isOAuthRevoked(err) {
+			_, _ = s.svc.pool.Exec(ctx,
+				`UPDATE user_channels SET enabled = false, updated_at = now() WHERE id = $1`,
+				uc.ID,
+			)
+			slog.Warn("campaign scheduler: gmail token revoked, auto-disabled channel",
+				"channel_id", uc.ID, "user_id", camp.UserID)
+		}
 		return fmt.Errorf("channel send: %w", err)
 	}
 
@@ -187,4 +208,33 @@ func (s *Scheduler) sendOne(ctx context.Context, row CampaignContactWithCampaign
 		}
 	}
 	return nil
+}
+
+// truncErr returns a DB-safe, UI-friendly version of an error message.
+// Long Google API errors (often 2-3 KB of HTML) are clipped so the
+// campaign UI can render the reason without exploding the row.
+func truncErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if len(s) > 500 {
+		s = s[:497] + "..."
+	}
+	return s
+}
+
+// isOAuthRevoked detects the specific Google response that means the
+// user's refresh token is permanently dead: "invalid_grant" with
+// "Token has been expired or revoked" in the error body, OR the
+// 7-day-test-app expiry signal "Bad Request". Either way the only
+// remedy is a fresh OAuth flow — auto-disable the channel.
+func isOAuthRevoked(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "invalid_grant") ||
+		strings.Contains(msg, "Token has been expired or revoked") ||
+		strings.Contains(msg, "oauth2: cannot fetch token")
 }

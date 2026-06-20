@@ -37,6 +37,11 @@ type Market struct {
 	SourceFileName     *string    `json:"source_file_name" db:"source_file_name"`
 	UploadedAt         *time.Time `json:"uploaded_at" db:"uploaded_at"`
 
+	// SenderProfileID is the brand this market sends as. One fixed brand per
+	// market; Email Groups created from the market inherit it. Nil until the
+	// user assigns one (groups can't be created from a market with no brand).
+	SenderProfileID *uuid.UUID `json:"sender_profile_id" db:"sender_profile_id"`
+
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }

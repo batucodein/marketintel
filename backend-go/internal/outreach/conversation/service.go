@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 
 	"github.com/batuhan/marketintel/internal/domain"
 	"github.com/batuhan/marketintel/internal/outreach/channel"
+	"github.com/batuhan/marketintel/internal/outreach/compliance"
 	"github.com/batuhan/marketintel/internal/outreach/contact"
+	"github.com/batuhan/marketintel/internal/outreach/replyguidance"
 	"github.com/batuhan/marketintel/internal/outreach/sender"
 	"github.com/batuhan/marketintel/internal/platform/ai"
 	"github.com/batuhan/marketintel/internal/platform/ai/prompts"
@@ -162,11 +165,25 @@ func (s *Service) SendMessage(ctx context.Context, userID, conversationID uuid.U
 		if draft == nil {
 			return nil, fmt.Errorf("draft %s not found in this conversation", *req.DraftMessageID)
 		}
+		// Only an actual draft may be "sent as draft" — a stale tab passing an
+		// already-sent message id must not re-send it.
+		if draft.Status != domain.MessageStatusPendingApproval && draft.Status != domain.MessageStatusDraft {
+			return nil, fmt.Errorf("message %s is not a pending draft (status %s)", draft.ID, draft.Status)
+		}
+		// The user's edited text wins: the compose box promises "your edits will
+		// be sent". The stored draft is only the fallback when the request omits
+		// a field, and we persist what was actually sent back onto the row.
 		if draft.Subject != nil {
 			subject = *draft.Subject
 		}
 		if draft.BodyText != nil {
 			body = *draft.BodyText
+		}
+		if strings.TrimSpace(req.Subject) != "" {
+			subject = req.Subject
+		}
+		if strings.TrimSpace(req.Body) != "" {
+			body = req.Body
 		}
 		msgID = draft.ID
 		isDraft = true
@@ -196,6 +213,13 @@ func (s *Service) SendMessage(ctx context.Context, userID, conversationID uuid.U
 	if c.PrimaryEmail == nil || *c.PrimaryEmail == "" {
 		return nil, errors.New("contact has no email")
 	}
+	// Approving an AI draft must re-check suppression — the draft may have been
+	// created before the contact unsubscribed (keyword/one-click can race the
+	// reply branch). Hand-typed manual messages stay allowed: confirming an
+	// opt-out by hand is legitimate.
+	if isDraft && compliance.IsSuppressed(c) {
+		return nil, errors.New("contact has unsubscribed — automated drafts can no longer be sent (you can still write a manual message)")
+	}
 
 	// Identify previous outbound external id for threading on replies.
 	inReplyTo := ""
@@ -219,9 +243,10 @@ func (s *Service) SendMessage(ctx context.Context, userID, conversationID uuid.U
 	if conv.ExternalThreadID != nil {
 		sendReq.ThreadID = *conv.ExternalThreadID
 	}
-	// Optionally attach the user's catalog.
+	// Optionally attach the brand's catalog.
 	if req.AttachCatalog {
-		fname, mimeType, data, err := s.sender.GetCatalogData(ctx, userID)
+		brand := s.brandForConv(ctx, conv, userID)
+		fname, mimeType, data, err := s.sender.GetCatalogData(ctx, brand.ID)
 		if err == nil && len(data) > 0 {
 			sendReq.Attachments = []channel.Attachment{{
 				Filename: fname,
@@ -239,13 +264,16 @@ func (s *Service) SendMessage(ctx context.Context, userID, conversationID uuid.U
 	// Persist the message (either replacing the draft status, or fresh).
 	now := time.Now().UTC()
 	if isDraft {
-		// Update the draft row to sent.
+		// Update the draft row to sent, persisting the text that actually went
+		// out (the user may have edited the draft in the compose box). body_html
+		// is cleared — it could only be stale relative to the edited text.
 		_, err = s.pool.Exec(ctx,
 			`UPDATE messages SET
 			   external_id = $1, status = $2, sent_at = $3,
-			   in_reply_to_external_id = NULLIF($4, '')
-			 WHERE id = $5`,
-			res.ExternalMessageID, domain.MessageStatusSent, now, inReplyTo, msgID,
+			   in_reply_to_external_id = NULLIF($4, ''),
+			   subject = $5, body_text = $6, body_html = NULL
+			 WHERE id = $7`,
+			res.ExternalMessageID, domain.MessageStatusSent, now, inReplyTo, subject, body, msgID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("update sent draft: %w", err)
@@ -334,10 +362,7 @@ func (s *Service) DraftReply(ctx context.Context, userID, conversationID uuid.UU
 		return nil, err
 	}
 
-	sp, _ := s.sender.Get(ctx, userID)
-	if sp == nil {
-		sp = &domain.SenderProfile{UserID: userID, Tone: "formal"}
-	}
+	sp := s.brandForConv(ctx, conv, userID)
 	businessJSON := s.loadBusinessJSON(ctx, c.BusinessID)
 	shipmentCtx, _ := s.loadShipmentContext(ctx, c.BusinessID)
 	leadScoreJSON := s.loadLeadScoreJSON(ctx, userID, c.BusinessID)
@@ -380,27 +405,23 @@ func (s *Service) draftInitialMessage(
 	businessJSON, shipmentCtx, leadScoreJSON string,
 ) (*domain.Message, error) {
 	hasCatalog, catalogName := senderCatalog(sp)
-	prompt := prompts.BuildOutreachDraftPrompt(prompts.OutreachDraftInput{
-		SenderProfileJSON: prompts.EncodeJSON(sp),
-		ContactJSON:       prompts.EncodeJSON(c),
-		BusinessJSON:      businessJSON,
-		ShipmentContext:   shipmentCtx,
-		LeadScoreJSON:     leadScoreJSON,
-		HasCatalog:        hasCatalog,
-		CatalogFilename:   catalogName,
-	})
-	ctxAI := ai.WithUserID(ctx, userID)
-	raw, _, err := s.ai.CompleteJSON(ctxAI, "outreach_draft", prompt.Prompt, prompt.System, 30*time.Minute)
+	priorBlock := s.loadPriorConversationsBlock(ctx, userID, c.ID, conv.ID)
+
+	in := prompts.OutreachDraftInput{
+		SenderProfileJSON:         prompts.EncodeJSON(sp),
+		ContactJSON:               prompts.EncodeJSON(c),
+		BusinessJSON:              businessJSON,
+		ShipmentContext:           shipmentCtx,
+		LeadScoreJSON:             leadScoreJSON,
+		PriorConversationsContext: priorBlock,
+		HasCatalog:                hasCatalog,
+		CatalogFilename:           catalogName,
+	}
+	out, err := s.draftOutreachWithGuard(ctx, userID, in)
 	if err != nil {
-		return nil, fmt.Errorf("ai draft: %w", err)
+		return nil, err
 	}
-	var out prompts.OutreachDraftResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("parse ai draft: %w", err)
-	}
-	if out.Body == "" || out.Subject == "" {
-		return nil, errors.New("ai returned empty subject/body")
-	}
+	out.Body = prompts.WithSignature(out.Body, sp.Signature)
 	promptV := "outreach_draft_v1"
 	return s.repo.CreateMessage(ctx, domain.Message{
 		ConversationID:  conv.ID,
@@ -412,6 +433,74 @@ func (s *Service) draftInitialMessage(
 		AIPromptVersion: &promptV,
 		Status:          domain.MessageStatusPendingApproval,
 	})
+}
+
+// loadPriorConversationsBlock pulls up to 5 prior threads with this contact
+// across every campaign/channel and renders them into the compact text the
+// AI prompt expects. The "current" conversation is excluded so a freshly
+// created empty thread doesn't show up. Returns "" on any error or when
+// nothing relevant exists.
+func (s *Service) loadPriorConversationsBlock(ctx context.Context, userID, contactID, excludeConvID uuid.UUID) string {
+	threads, err := s.repo.ListByContact(ctx, userID, contactID, 5, 10)
+	if err != nil || len(threads) == 0 {
+		return ""
+	}
+	filtered := make([]ThreadWithMessages, 0, len(threads))
+	for _, t := range threads {
+		if t.Conversation.ID == excludeConvID {
+			continue
+		}
+		filtered = append(filtered, t)
+	}
+	if len(filtered) == 0 {
+		return ""
+	}
+	return RenderPriorConversations(filtered, time.Now())
+}
+
+// draftOutreachWithGuard runs one AI completion, validates the body with the
+// shared post-gen guard, and re-runs once with StricterRetry=true on any
+// violation. Falls back to the first attempt on retry failure so a partial
+// success still produces a draft.
+func (s *Service) draftOutreachWithGuard(ctx context.Context, userID uuid.UUID, in prompts.OutreachDraftInput) (*prompts.OutreachDraftResult, error) {
+	first, err := s.draftOutreachOnce(ctx, userID, in)
+	if err != nil {
+		return nil, err
+	}
+	mode := prompts.DraftModeCold
+	if in.PriorConversationsContext != "" {
+		mode = prompts.DraftModeReply
+	}
+	violations := prompts.ValidateOutreachBody(first.Body, in.HasCatalog, mode)
+	if len(violations) == 0 {
+		return first, nil
+	}
+	slog.Warn("outreach drafter: guard violations, retrying",
+		"violations", violations, "subject", first.Subject,
+	)
+	in.StricterRetry = true
+	second, err := s.draftOutreachOnce(ctx, userID, in)
+	if err != nil {
+		return first, nil
+	}
+	return second, nil
+}
+
+func (s *Service) draftOutreachOnce(ctx context.Context, userID uuid.UUID, in prompts.OutreachDraftInput) (*prompts.OutreachDraftResult, error) {
+	prompt := prompts.BuildOutreachDraftPrompt(in)
+	ctxAI := ai.WithUserID(ctx, userID)
+	raw, _, err := s.ai.CompleteJSON(ctxAI, "outreach_draft", prompt.Prompt, prompt.System, 0)
+	if err != nil {
+		return nil, fmt.Errorf("ai draft: %w", err)
+	}
+	var out prompts.OutreachDraftResult
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("parse ai draft: %w", err)
+	}
+	if out.Body == "" || out.Subject == "" {
+		return nil, errors.New("ai returned empty subject/body")
+	}
+	return &out, nil
 }
 
 // draftReplyOrFollowup handles both the reply and followup states using the
@@ -446,7 +535,11 @@ func (s *Service) draftReplyOrFollowup(
 	}
 
 	hasCatalog, catalogName := senderCatalog(sp)
-	prompt := prompts.BuildOutreachReplyPrompt(prompts.OutreachReplyInput{
+	guidance := ""
+	if state == "reply" && sp != nil {
+		guidance = replyguidance.Load(ctx, s.pool, conv.ID, conv.CampaignID, sp.ID)
+	}
+	in := prompts.OutreachReplyInput{
 		Mode:              state,
 		SenderProfileJSON: prompts.EncodeJSON(sp),
 		ContactJSON:       prompts.EncodeJSON(c),
@@ -455,18 +548,11 @@ func (s *Service) draftReplyOrFollowup(
 		ConversationText:  tb.String(),
 		HasCatalog:        hasCatalog,
 		CatalogFilename:   catalogName,
-	})
-	ctxAI := ai.WithUserID(ctx, userID)
-	raw, _, err := s.ai.CompleteJSON(ctxAI, "outreach_reply", prompt.Prompt, prompt.System, 30*time.Minute)
+		Guidance:          guidance,
+	}
+	out, err := s.replyOutreachWithGuard(ctx, userID, in)
 	if err != nil {
-		return nil, fmt.Errorf("ai reply: %w", err)
-	}
-	var out prompts.OutreachReplyResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("parse ai reply: %w", err)
-	}
-	if out.Body == "" {
-		return nil, errors.New("ai returned empty body")
+		return nil, err
 	}
 
 	subject := ""
@@ -487,6 +573,189 @@ func (s *Service) draftReplyOrFollowup(
 		AIPromptVersion: &promptV,
 		Status:          domain.MessageStatusPendingApproval,
 	})
+}
+
+// RefineDraft rewrites the conversation's current pending draft to incorporate
+// the user's instruction, re-running the reply prompt + guard, and updates the
+// draft body in place. If remember is true, the instruction is saved as a
+// per-brand lesson for this kind of reply (matched later by tags + sentiment).
+// RefineDraft rewrites a pending draft per the user's instruction. The prompt
+// family and guard cap follow the draft's actual state — a cold opener refines
+// through the cold-draft prompt (and may rewrite the subject), a reply/followup
+// through the reply prompt — so refinement never mangles a compliant draft with
+// the wrong word cap. previousBody, when non-empty, is the user's current
+// compose-box text (their manual edits), preferred over the stored row.
+func (s *Service) RefineDraft(ctx context.Context, userID, conversationID, draftID uuid.UUID, instruction, previousBody string, remember bool) (*domain.Message, error) {
+	conv, err := s.repo.Get(ctx, userID, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	draft, err := s.repo.GetMessage(ctx, draftID)
+	if err != nil {
+		return nil, err
+	}
+	if draft.ConversationID != conv.ID ||
+		(draft.Status != domain.MessageStatusPendingApproval && draft.Status != domain.MessageStatusDraft) {
+		return nil, domain.ErrNotFound
+	}
+	prev := ""
+	if draft.BodyText != nil {
+		prev = *draft.BodyText
+	}
+	if strings.TrimSpace(previousBody) != "" {
+		prev = previousBody // the user's in-progress edits win
+	}
+
+	msgs, err := s.repo.ListMessages(ctx, conv.ID)
+	if err != nil {
+		return nil, err
+	}
+	c, err := s.contacts.Get(ctx, userID, conv.ContactID)
+	if err != nil {
+		return nil, err
+	}
+	sp := s.brandForConv(ctx, conv, userID)
+	businessJSON := s.loadBusinessJSON(ctx, c.BusinessID)
+	leadScoreJSON := s.loadLeadScoreJSON(ctx, userID, c.BusinessID)
+
+	// Determine the draft's state from the real (sent/received) history —
+	// mirrors DraftReply's dispatch.
+	var tb strings.Builder
+	state := "initial"
+	for _, m := range msgs {
+		if m.Status == domain.MessageStatusPendingApproval || m.Status == domain.MessageStatusDraft {
+			continue
+		}
+		if m.Direction == domain.DirectionInbound {
+			state = "reply"
+		} else {
+			state = "followup"
+		}
+		subj := ""
+		if m.Subject != nil {
+			subj = *m.Subject
+		}
+		body := ""
+		if m.BodyText != nil {
+			body = *m.BodyText
+		} else if m.BodyHTML != nil {
+			body = *m.BodyHTML
+		}
+		who := "YOU"
+		if m.Direction == domain.DirectionInbound {
+			who = "THEM"
+		}
+		tb.WriteString(fmt.Sprintf("--- %s (%s) ---\nSubject: %s\n%s\n\n", who, m.Direction, subj, body))
+	}
+
+	hasCatalog, catalogName := senderCatalog(sp)
+
+	if state == "initial" {
+		// Refining a cold opener: use the cold-draft prompt + cold guard cap,
+		// and let the model revise the subject too.
+		shipmentCtx, _ := s.loadShipmentContext(ctx, c.BusinessID)
+		din := prompts.OutreachDraftInput{
+			SenderProfileJSON: prompts.EncodeJSON(sp),
+			ContactJSON:       prompts.EncodeJSON(c),
+			BusinessJSON:      businessJSON,
+			ShipmentContext:   shipmentCtx,
+			LeadScoreJSON:     leadScoreJSON,
+			HasCatalog:        hasCatalog,
+			CatalogFilename:   catalogName,
+			RefineInstruction: instruction,
+			PreviousDraft:     prev,
+		}
+		out, err := s.draftOutreachWithGuard(ctx, userID, din)
+		if err != nil {
+			return nil, err
+		}
+		out.Body = prompts.WithSignature(out.Body, sp.Signature)
+		if err := s.repo.UpdateMessageDraft(ctx, draft.ID, out.Subject, out.Body); err != nil {
+			return nil, err
+		}
+		// No lesson capture for cold drafts: lessons are reply guidance, keyed
+		// to a buyer answer's sentiment/tags — a cold opener has neither.
+		return s.repo.GetMessage(ctx, draft.ID)
+	}
+
+	guidance := ""
+	if state == "reply" && sp != nil {
+		guidance = replyguidance.Load(ctx, s.pool, conv.ID, conv.CampaignID, sp.ID)
+	}
+	in := prompts.OutreachReplyInput{
+		Mode:              state, // "reply" or "followup" — picks prompt wording AND guard cap
+		SenderProfileJSON: prompts.EncodeJSON(sp),
+		ContactJSON:       prompts.EncodeJSON(c),
+		BusinessJSON:      businessJSON,
+		LeadScoreJSON:     leadScoreJSON,
+		ConversationText:  tb.String(),
+		HasCatalog:        hasCatalog,
+		CatalogFilename:   catalogName,
+		Guidance:          guidance,
+		RefineInstruction: instruction,
+		PreviousDraft:     prev,
+	}
+	out, err := s.replyOutreachWithGuard(ctx, userID, in)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.UpdateMessageBody(ctx, draft.ID, out.Body); err != nil {
+		return nil, err
+	}
+	// Lessons only make sense for replies — remembering from a followup/cold
+	// refine would store an untagged neutral lesson that contaminates every
+	// future neutral reply for the brand.
+	if remember && state == "reply" && strings.TrimSpace(instruction) != "" && sp != nil {
+		if err := replyguidance.RememberLesson(ctx, s.pool, userID, sp.ID, conv.ID, instruction); err != nil {
+			slog.Warn("refine: remember lesson failed", "conversation_id", conv.ID, "error", err)
+		}
+	}
+	return s.repo.GetMessage(ctx, draft.ID)
+}
+
+// replyOutreachWithGuard runs the reply/followup AI call, validates the
+// body with the post-gen guard (mode picked from in.Mode), and retries once
+// with StricterRetry=true on violation. Falls back to first attempt on
+// retry failure.
+func (s *Service) replyOutreachWithGuard(ctx context.Context, userID uuid.UUID, in prompts.OutreachReplyInput) (*prompts.OutreachReplyResult, error) {
+	first, err := s.replyOutreachOnce(ctx, userID, in)
+	if err != nil {
+		return nil, err
+	}
+	mode := prompts.DraftModeReply
+	if in.Mode == "followup" {
+		mode = prompts.DraftModeFollowup
+	}
+	violations := prompts.ValidateOutreachBody(first.Body, in.HasCatalog, mode)
+	if len(violations) == 0 {
+		return first, nil
+	}
+	slog.Warn("outreach replier: guard violations, retrying",
+		"violations", violations, "mode", in.Mode,
+	)
+	in.StricterRetry = true
+	second, err := s.replyOutreachOnce(ctx, userID, in)
+	if err != nil {
+		return first, nil
+	}
+	return second, nil
+}
+
+func (s *Service) replyOutreachOnce(ctx context.Context, userID uuid.UUID, in prompts.OutreachReplyInput) (*prompts.OutreachReplyResult, error) {
+	prompt := prompts.BuildOutreachReplyPrompt(in)
+	ctxAI := ai.WithUserID(ctx, userID)
+	raw, _, err := s.ai.CompleteJSON(ctxAI, "outreach_reply", prompt.Prompt, prompt.System, 0)
+	if err != nil {
+		return nil, fmt.Errorf("ai reply: %w", err)
+	}
+	var out prompts.OutreachReplyResult
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("parse ai reply: %w", err)
+	}
+	if out.Body == "" {
+		return nil, errors.New("ai returned empty body")
+	}
+	return &out, nil
 }
 
 // loadLeadScoreJSON returns the best (highest overall_score, newest) lead
@@ -529,38 +798,30 @@ func (s *Service) loadLeadScoreJSON(ctx context.Context, userID, businessID uuid
 // --- internals ---------------------------------------------------------
 
 func (s *Service) draftInitial(ctx context.Context, userID uuid.UUID, c *domain.Contact) (*prompts.OutreachDraftResult, error) {
-	sp, _ := s.sender.Get(ctx, userID)
-	if sp == nil {
-		sp = &domain.SenderProfile{UserID: userID, Tone: "formal"}
-	}
+	sp := s.defaultBrand(ctx, userID)
 	businessJSON := s.loadBusinessJSON(ctx, c.BusinessID)
 	shipmentContext, _ := s.loadShipmentContext(ctx, c.BusinessID)
 	leadScoreJSON := s.loadLeadScoreJSON(ctx, userID, c.BusinessID)
+	priorBlock := s.loadPriorConversationsBlock(ctx, userID, c.ID, uuid.Nil)
 
 	hasCatalog, catalogName := senderCatalog(sp)
-	prompt := prompts.BuildOutreachDraftPrompt(prompts.OutreachDraftInput{
-		SenderProfileJSON:   prompts.EncodeJSON(sp),
-		CampaignPositioning: "",
-		ContactJSON:         prompts.EncodeJSON(c),
-		BusinessJSON:        businessJSON,
-		ShipmentContext:     shipmentContext,
-		LeadScoreJSON:       leadScoreJSON,
-		HasCatalog:          hasCatalog,
-		CatalogFilename:     catalogName,
-	})
-	ctxAI := ai.WithUserID(ctx, userID)
-	raw, _, err := s.ai.CompleteJSON(ctxAI, "outreach_draft", prompt.Prompt, prompt.System, 30*time.Minute)
+	in := prompts.OutreachDraftInput{
+		SenderProfileJSON:         prompts.EncodeJSON(sp),
+		CampaignPositioning:       "",
+		ContactJSON:               prompts.EncodeJSON(c),
+		BusinessJSON:              businessJSON,
+		ShipmentContext:           shipmentContext,
+		LeadScoreJSON:             leadScoreJSON,
+		PriorConversationsContext: priorBlock,
+		HasCatalog:                hasCatalog,
+		CatalogFilename:           catalogName,
+	}
+	out, err := s.draftOutreachWithGuard(ctx, userID, in)
 	if err != nil {
 		return nil, err
 	}
-	var out prompts.OutreachDraftResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
-	}
-	if out.Subject == "" || out.Body == "" {
-		return nil, errors.New("ai returned empty subject/body")
-	}
-	return &out, nil
+	out.Body = prompts.WithSignature(out.Body, sp.Signature)
+	return out, nil
 }
 
 func (s *Service) loadBusinessJSON(ctx context.Context, id uuid.UUID) string {
@@ -624,6 +885,34 @@ func (s *Service) loadShipmentContext(ctx context.Context, id uuid.UUID) (string
 		parts = append(parts, "trust tier: "+sd.TrustTier)
 	}
 	return strings.Join(parts, " | "), nil
+}
+
+// defaultBrand resolves the user's Default brand. Returns a minimal stub
+// (never nil) so callers always have a usable profile.
+func (s *Service) defaultBrand(ctx context.Context, userID uuid.UUID) *domain.SenderProfile {
+	sp, err := s.sender.DefaultForUser(ctx, userID)
+	if err != nil || sp == nil {
+		return &domain.SenderProfile{UserID: userID, Tone: "formal"}
+	}
+	return sp
+}
+
+// brandForConv resolves the brand a conversation should send/draft as. If the
+// conversation belongs to a campaign (Email Group) with an assigned brand, use
+// it; otherwise the user's Default brand. Avoids importing the campaign
+// package (cycle) by reading the column directly.
+func (s *Service) brandForConv(ctx context.Context, conv *domain.Conversation, userID uuid.UUID) *domain.SenderProfile {
+	if conv != nil && conv.CampaignID != nil {
+		var profileID *uuid.UUID
+		if err := s.pool.QueryRow(ctx,
+			`SELECT sender_profile_id FROM campaigns WHERE id = $1`, *conv.CampaignID,
+		).Scan(&profileID); err == nil && profileID != nil {
+			if sp, err := s.sender.GetByID(ctx, userID, *profileID); err == nil && sp != nil {
+				return sp
+			}
+		}
+	}
+	return s.defaultBrand(ctx, userID)
 }
 
 // senderCatalog returns whether the sender profile has a catalog uploaded,

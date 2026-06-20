@@ -76,9 +76,15 @@ const (
 
 // --- SenderProfile ------------------------------------------------------
 
-// SenderProfile is the "what I sell" context used for AI personalization.
-// One per user. Campaigns may override specific fields.
+// SenderProfile is the "what I sell" context used for AI personalization
+// AND for AI lead scoring (so leads are ranked against THIS user's ICP,
+// not just the market's product). One per user. Campaigns may override
+// specific fields.
 type SenderProfile struct {
+	// ID is the brand's primary key. A user can have many sender profiles
+	// (one brand per market). UserID is now just the owner reference.
+	ID                     uuid.UUID  `json:"id" db:"id"`
+	Name                   string     `json:"name" db:"name"`
 	UserID                 uuid.UUID  `json:"user_id" db:"user_id"`
 	CompanyName            string     `json:"company_name" db:"company_name"`
 	ProductDescription     string     `json:"product_description" db:"product_description"`
@@ -88,6 +94,17 @@ type SenderProfile struct {
 	Signature              string     `json:"signature" db:"signature"`
 	PhysicalAddress        string     `json:"physical_address" db:"physical_address"`
 	DefaultChannelID       *uuid.UUID `json:"default_channel_id" db:"default_channel_id"`
+
+	// Targeting fields (added by migration 17). Free-text by design —
+	// the AI scorer reads them as natural language so the user can
+	// express intent without locking us into rigid taxonomies.
+	TargetIndustries    string `json:"target_industries" db:"target_industries"`
+	TargetCountries     string `json:"target_countries" db:"target_countries"`
+	AvoidCountries      string `json:"avoid_countries" db:"avoid_countries"`
+	MinDealSizeUSD      *int64 `json:"min_deal_size_usd" db:"min_deal_size_usd"`
+	TypicalDealSizeUSD  *int64 `json:"typical_deal_size_usd" db:"typical_deal_size_usd"`
+	DealBreakers        string `json:"deal_breakers" db:"deal_breakers"`
+	CompetitiveMoats    string `json:"competitive_moats" db:"competitive_moats"`
 
 	// Catalog metadata. Bytes live in sender_profiles.catalog_data but are
 	// NEVER included in the JSON response — fetched separately during send.
@@ -189,6 +206,16 @@ type Campaign struct {
 	Status               string          `json:"status" db:"status"`
 	PositioningOverride  json.RawMessage `json:"positioning_override,omitempty" db:"positioning_override"`
 	SequenceID           *uuid.UUID      `json:"sequence_id" db:"sequence_id"`
+	// MarketID scopes the campaign (Email Group) to one market; SenderProfileID
+	// is the brand it sends as (resolved from that market at creation). Both
+	// nullable so legacy campaigns survive — workers fall back to the user's
+	// Default brand when SenderProfileID is nil.
+	MarketID             *uuid.UUID      `json:"market_id" db:"market_id"`
+	ContactGroupID       *uuid.UUID      `json:"contact_group_id" db:"contact_group_id"`
+	SenderProfileID      *uuid.UUID      `json:"sender_profile_id" db:"sender_profile_id"`
+	// Response-aware follow-up branches: what to do when a recipient replies.
+	OnPositiveAction     string          `json:"on_positive_action" db:"on_positive_action"`
+	OnNegativeAction     string          `json:"on_negative_action" db:"on_negative_action"`
 	SendPacePerDay       int             `json:"send_pace_per_day" db:"send_pace_per_day"`
 	AttachCatalog        bool            `json:"attach_catalog" db:"attach_catalog"`
 	StartAt              *time.Time      `json:"start_at" db:"start_at"`
@@ -243,6 +270,7 @@ type CampaignSummary struct {
 	ApprovedCount int `json:"approved_count"`
 	SentCount     int `json:"sent_count"`
 	RepliedCount  int `json:"replied_count"`
+	ColdCount     int `json:"cold_count"`
 	SkippedCount  int `json:"skipped_count"`
 	FailedCount   int `json:"failed_count"`
 	TotalCount    int `json:"total_count"`
@@ -285,6 +313,22 @@ const (
 	SequenceActionAdvanceStage = "advance_stage"
 )
 
+// Response-branch actions: what a campaign does when a recipient replies.
+const (
+	OnPositiveAutoDraftReply = "auto_draft_reply" // AI drafts a reply for approval (default)
+	OnPositiveNotify         = "notify"           // flag it; user takes over
+	OnPositiveAutoSend       = "auto_send"        // AI replies and sends (needs prior human send)
+	OnNegativeMarkCold       = "mark_cold"        // stop + mark the contact cold (default)
+	OnNegativeNotify         = "notify"           // flag it; user takes over
+)
+
+// Inbound sentiment buckets (mirrors the classifier output).
+const (
+	SentimentPositive = "positive"
+	SentimentNeutral  = "neutral"
+	SentimentNegative = "negative"
+)
+
 // SequenceWithSteps is the API-facing sequence, used in handler responses.
 type SequenceWithSteps struct {
 	Sequence
@@ -311,6 +355,19 @@ const (
 	SequenceRunCompleted       = "completed"
 	SequenceRunStoppedOnReply  = "stopped_on_reply"
 )
+
+// --- Contact groups -----------------------------------------------------
+
+// ContactGroup is a named, user-owned collection of contacts with its own
+// brand. Email groups are built from a contact group.
+type ContactGroup struct {
+	ID              uuid.UUID  `json:"id" db:"id"`
+	UserID          uuid.UUID  `json:"user_id" db:"user_id"`
+	Name            string     `json:"name" db:"name"`
+	SenderProfileID *uuid.UUID `json:"sender_profile_id" db:"sender_profile_id"`
+	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at" db:"updated_at"`
+}
 
 // --- Tasks & notes ------------------------------------------------------
 

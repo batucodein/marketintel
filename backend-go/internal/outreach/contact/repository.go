@@ -17,12 +17,28 @@ type Repository interface {
 	// pulling name/email/phone defaults from the business on create.
 	UpsertFromBusiness(ctx context.Context, userID, businessID uuid.UUID) (*domain.Contact, error)
 
+	// EnsureBulkFromBusinesses processes a list of business IDs and bucketing
+	// them into added/already_existed/no_email — used by the leads page's
+	// "Add to contacts" bulk action. Idempotent: re-running picks up newly
+	// emailed leads as "added" and existing contacts as "already_existed".
+	EnsureBulkFromBusinesses(ctx context.Context, userID uuid.UUID, businessIDs []uuid.UUID) (BulkEnsureResult, error)
+
 	Get(ctx context.Context, userID, id uuid.UUID) (*domain.Contact, error)
 	// GetByID looks up a contact by primary key only — used by the public
 	// unsubscribe handler where the user_id is not known up front.
 	GetByID(ctx context.Context, id uuid.UUID) (*domain.Contact, error)
 	GetByBusiness(ctx context.Context, userID, businessID uuid.UUID) (*domain.Contact, error)
 	List(ctx context.Context, userID uuid.UUID, stage string, limit, offset int) ([]domain.Contact, int, error)
+	// ListByMarket returns the user's contacts whose business belongs to the
+	// given market (via the business_markets junction). Contacts stay
+	// one-per-(user,business) globally — market membership is derived, not
+	// stored on the contact, so dedup is preserved.
+	ListByMarket(ctx context.Context, userID, marketID uuid.UUID, limit, offset int) ([]domain.Contact, int, error)
+	// ListByGroup returns the contacts that are members of a contact group.
+	ListByGroup(ctx context.Context, userID, groupID uuid.UUID, limit, offset int) ([]domain.Contact, int, error)
+	// IDsForBusinesses maps the user's businesses to their contact ids (only
+	// businesses that already have a contact are returned).
+	IDsForBusinesses(ctx context.Context, userID uuid.UUID, businessIDs []uuid.UUID) ([]uuid.UUID, error)
 	Update(ctx context.Context, c domain.Contact) (*domain.Contact, error)
 	// MarkUnsubscribed flips the suppression flag. Idempotent; safe on a
 	// contact that was already unsubscribed.
@@ -38,6 +54,24 @@ type BulkFields struct {
 	PipelineStage     *string
 	DefaultAutomation *string
 	DefaultSequenceID *uuid.UUID
+}
+
+// BulkEnsureItem identifies a business across the three result buckets so
+// the UI can show recognisable names alongside the counts.
+type BulkEnsureItem struct {
+	BusinessID uuid.UUID `json:"business_id"`
+	Name       string    `json:"name"`
+}
+
+// BulkEnsureResult breaks the input list into actionable buckets:
+//   Added          → contacts created on this call
+//   AlreadyExisted → contacts that already existed (idempotent skip)
+//   NoEmail        → businesses with no email yet — surfaced so the user
+//                    can manually research and enter one, then re-run
+type BulkEnsureResult struct {
+	Added          []BulkEnsureItem `json:"added"`
+	AlreadyExisted []BulkEnsureItem `json:"already_existed"`
+	NoEmail        []BulkEnsureItem `json:"no_email"`
 }
 
 type repository struct {
@@ -95,6 +129,107 @@ func (r *repository) UpsertFromBusiness(ctx context.Context, userID, businessID 
 		return nil, fmt.Errorf("insert contact: %w", err)
 	}
 	return r.GetByBusiness(ctx, userID, businessID)
+}
+
+// EnsureBulkFromBusinesses fans out across the input list, bucketing each
+// business by outcome. Skips businesses with no email so the user can fix
+// that up first (manual entry on the lead drawer); keeps the call
+// idempotent so re-running after fixing emails just promotes them from
+// no_email → added without disturbing existing contacts.
+func (r *repository) EnsureBulkFromBusinesses(ctx context.Context, userID uuid.UUID, businessIDs []uuid.UUID) (BulkEnsureResult, error) {
+	out := BulkEnsureResult{
+		Added:          []BulkEnsureItem{},
+		AlreadyExisted: []BulkEnsureItem{},
+		NoEmail:        []BulkEnsureItem{},
+	}
+	if len(businessIDs) == 0 {
+		return out, nil
+	}
+
+	// One read pass to grab name + email for every requested business.
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, name, email FROM businesses WHERE id = ANY($1)`,
+		businessIDs,
+	)
+	if err != nil {
+		return out, fmt.Errorf("load businesses for bulk ensure: %w", err)
+	}
+	type row struct {
+		id    uuid.UUID
+		name  string
+		email *string
+	}
+	loaded := make(map[uuid.UUID]row, len(businessIDs))
+	for rows.Next() {
+		var rr row
+		if err := rows.Scan(&rr.id, &rr.name, &rr.email); err != nil {
+			rows.Close()
+			return out, fmt.Errorf("scan bulk ensure row: %w", err)
+		}
+		loaded[rr.id] = rr
+	}
+	rows.Close()
+
+	// One read pass for already-existing contacts.
+	existRows, err := r.pool.Query(ctx,
+		`SELECT business_id FROM contacts WHERE user_id = $1 AND business_id = ANY($2)`,
+		userID, businessIDs,
+	)
+	if err != nil {
+		return out, fmt.Errorf("load existing contacts: %w", err)
+	}
+	exists := make(map[uuid.UUID]bool, len(businessIDs))
+	for existRows.Next() {
+		var bid uuid.UUID
+		if err := existRows.Scan(&bid); err != nil {
+			existRows.Close()
+			return out, err
+		}
+		exists[bid] = true
+	}
+	existRows.Close()
+
+	// Bucket each requested ID. Insert in one transaction for atomicity.
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return out, err
+	}
+	defer tx.Rollback(ctx)
+
+	for _, bid := range businessIDs {
+		l, ok := loaded[bid]
+		if !ok {
+			// Unknown business id — skip silently rather than fail the
+			// whole batch. (Could happen if a lead was deleted between
+			// the user opening the page and clicking the button.)
+			continue
+		}
+		if exists[bid] {
+			out.AlreadyExisted = append(out.AlreadyExisted, BulkEnsureItem{BusinessID: bid, Name: l.name})
+			continue
+		}
+		hasEmail := l.email != nil && *l.email != ""
+		if !hasEmail {
+			out.NoEmail = append(out.NoEmail, BulkEnsureItem{BusinessID: bid, Name: l.name})
+			continue
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO contacts (id, user_id, business_id, primary_email,
+			                       display_name, pipeline_stage, default_automation)
+			 VALUES (gen_random_uuid(), $1, $2, $3, $4, 'lead', 'manual')
+			 ON CONFLICT (user_id, business_id) DO NOTHING`,
+			userID, bid, l.email, l.name,
+		)
+		if err != nil {
+			return out, fmt.Errorf("bulk insert contact %s: %w", bid, err)
+		}
+		out.Added = append(out.Added, BulkEnsureItem{BusinessID: bid, Name: l.name})
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return out, err
+	}
+	return out, nil
 }
 
 func (r *repository) Get(ctx context.Context, userID, id uuid.UUID) (*domain.Contact, error) {
@@ -178,6 +313,107 @@ func (r *repository) List(ctx context.Context, userID uuid.UUID, stage string, l
 		out = append(out, c)
 	}
 	return out, total, nil
+}
+
+func (r *repository) ListByMarket(ctx context.Context, userID, marketID uuid.UUID, limit, offset int) ([]domain.Contact, int, error) {
+	var total int
+	if err := r.pool.QueryRow(ctx,
+		`SELECT count(*) FROM contacts c
+		 JOIN business_markets bm ON bm.business_id = c.business_id
+		 WHERE c.user_id = $1 AND bm.market_id = $2`,
+		userID, marketID,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count contacts by market: %w", err)
+	}
+
+	rows, err := r.pool.Query(ctx,
+		`SELECT c.id, c.user_id, c.business_id, c.primary_email, c.primary_phone, c.display_name,
+		        c.pipeline_stage, c.default_automation, c.default_sequence_id,
+		        c.unsubscribed_at, c.unsubscribe_reason, c.created_at, c.updated_at
+		 FROM contacts c
+		 JOIN business_markets bm ON bm.business_id = c.business_id
+		 WHERE c.user_id = $1 AND bm.market_id = $2
+		 ORDER BY c.updated_at DESC
+		 LIMIT $3 OFFSET $4`,
+		userID, marketID, limit, offset,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list contacts by market: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.Contact
+	for rows.Next() {
+		var c domain.Contact
+		if err := rows.Scan(&c.ID, &c.UserID, &c.BusinessID, &c.PrimaryEmail, &c.PrimaryPhone,
+			&c.DisplayName, &c.PipelineStage, &c.DefaultAutomation, &c.DefaultSequenceID,
+			&c.UnsubscribedAt, &c.UnsubscribeReason, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, 0, fmt.Errorf("scan contact row: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, total, nil
+}
+
+func (r *repository) ListByGroup(ctx context.Context, userID, groupID uuid.UUID, limit, offset int) ([]domain.Contact, int, error) {
+	var total int
+	if err := r.pool.QueryRow(ctx,
+		`SELECT count(*) FROM contacts c
+		 JOIN contact_group_members m ON m.contact_id = c.id
+		 WHERE c.user_id = $1 AND m.contact_group_id = $2`,
+		userID, groupID,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count contacts by group: %w", err)
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT c.id, c.user_id, c.business_id, c.primary_email, c.primary_phone, c.display_name,
+		        c.pipeline_stage, c.default_automation, c.default_sequence_id,
+		        c.unsubscribed_at, c.unsubscribe_reason, c.created_at, c.updated_at
+		 FROM contacts c
+		 JOIN contact_group_members m ON m.contact_id = c.id
+		 WHERE c.user_id = $1 AND m.contact_group_id = $2
+		 ORDER BY c.updated_at DESC
+		 LIMIT $3 OFFSET $4`,
+		userID, groupID, limit, offset,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list contacts by group: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Contact
+	for rows.Next() {
+		var c domain.Contact
+		if err := rows.Scan(&c.ID, &c.UserID, &c.BusinessID, &c.PrimaryEmail, &c.PrimaryPhone,
+			&c.DisplayName, &c.PipelineStage, &c.DefaultAutomation, &c.DefaultSequenceID,
+			&c.UnsubscribedAt, &c.UnsubscribeReason, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, 0, fmt.Errorf("scan contact row: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, total, nil
+}
+
+func (r *repository) IDsForBusinesses(ctx context.Context, userID uuid.UUID, businessIDs []uuid.UUID) ([]uuid.UUID, error) {
+	if len(businessIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT id FROM contacts WHERE user_id = $1 AND business_id = ANY($2)`,
+		userID, businessIDs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("contact ids for businesses: %w", err)
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, nil
 }
 
 func (r *repository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Contact, error) {

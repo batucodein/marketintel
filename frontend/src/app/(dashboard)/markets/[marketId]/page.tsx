@@ -3,8 +3,10 @@
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import useSWR from "swr";
-import { getMarket } from "@/lib/api/markets";
+import { getMarket, assignBrandToMarket } from "@/lib/api/markets";
+import { listSenderProfiles } from "@/lib/api/outreach";
 import type { Market } from "@/lib/types/market";
+import type { SenderProfile } from "@/lib/types/outreach";
 import { CountryFlag } from "@/components/shared/country-flag";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { buttonVariants } from "@/components/ui/button";
@@ -21,7 +23,7 @@ import {
 export default function MarketDetailPage() {
   const { marketId } = useParams<{ marketId: string }>();
 
-  const { data: market, error } = useSWR<Market>(
+  const { data: market, error, mutate } = useSWR<Market>(
     `/markets/${marketId}`,
     () => getMarket(marketId),
   );
@@ -119,6 +121,12 @@ export default function MarketDetailPage() {
         )}
       </div>
 
+      <BrandCard
+        marketId={marketId}
+        senderProfileId={market.sender_profile_id}
+        onChange={() => mutate()}
+      />
+
       {market.all_hs_codes && market.all_hs_codes.length > 1 && (
         <Card>
           <CardHeader className="pb-2">
@@ -159,6 +167,68 @@ export default function MarketDetailPage() {
         </Card>
       )}
     </div>
+  );
+}
+
+// BrandCard lets the user assign the market's fixed brand (sender profile).
+// Email Groups created from this market inherit it.
+function BrandCard({
+  marketId,
+  senderProfileId,
+  onChange,
+}: {
+  marketId: string;
+  senderProfileId: string | null;
+  onChange: () => void;
+}) {
+  const { data: profiles } = useSWR<SenderProfile[]>(
+    "/outreach/sender-profile",
+    () => listSenderProfiles(),
+  );
+
+  async function handleChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    const value = e.target.value || null;
+    try {
+      await assignBrandToMarket(marketId, value);
+      onChange();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to assign brand");
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Sender brand</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <p className="text-xs text-muted-foreground">
+          The brand this market sends as. Email Groups created from this market use it.
+          {!senderProfileId && " Assign one before creating a group."}
+        </p>
+        <select
+          value={senderProfileId ?? ""}
+          onChange={handleChange}
+          className="w-full md:w-80 h-9 rounded-md border border-input bg-background px-3 text-sm"
+        >
+          <option value="">— No brand assigned —</option>
+          {(profiles ?? []).map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name || p.company_name}
+            </option>
+          ))}
+        </select>
+        {(profiles ?? []).length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            No brands yet —{" "}
+            <Link href="/outreach/settings/profile" className="underline">
+              create one
+            </Link>
+            .
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

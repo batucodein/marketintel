@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useAuth } from "@/lib/providers/auth-provider";
+import { useTheme } from "@/lib/providers/theme-provider";
 import { updateMe } from "@/lib/api/auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -10,10 +11,11 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { CountryFlag } from "@/components/shared/country-flag";
 import { COUNTRY_LIST } from "@/lib/utils/country";
-import { Loader2, Check } from "lucide-react";
+import { Loader2, Check, Sun, Moon } from "lucide-react";
 
 export default function SettingsPage() {
   const { user } = useAuth();
+  const { theme, toggle } = useTheme();
   const [editing, setEditing] = useState(false);
   const [companyName, setCompanyName] = useState(user?.company_name || "");
   const [homeCountry, setHomeCountry] = useState(user?.home_country || "");
@@ -113,6 +115,31 @@ export default function SettingsPage() {
               <Badge variant="outline">{user.subscription_tier}</Badge>
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Appearance</CardTitle>
+        </CardHeader>
+        <CardContent className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium">Dark mode</p>
+            <p className="text-xs text-muted-foreground">
+              Currently {theme === "dark" ? "on" : "off"}.
+            </p>
+          </div>
+          <Button variant="outline" size="sm" onClick={toggle}>
+            {theme === "dark" ? (
+              <>
+                <Sun className="h-4 w-4 mr-1" /> Switch to light
+              </>
+            ) : (
+              <>
+                <Moon className="h-4 w-4 mr-1" /> Switch to dark
+              </>
+            )}
+          </Button>
         </CardContent>
       </Card>
 

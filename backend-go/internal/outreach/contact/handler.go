@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/batuhan/marketintel/internal/auth"
+	"github.com/batuhan/marketintel/internal/domain"
 	"github.com/batuhan/marketintel/internal/platform/httputil"
 )
 
@@ -32,6 +33,7 @@ func (h *Handler) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", h.List)
 	r.Post("/ensure", h.EnsureFromBusiness)
+	r.Post("/ensure-bulk", h.EnsureBulkFromBusinesses)
 	r.Patch("/bulk", h.BulkUpdate)
 	r.Get("/{contactID}", h.Get)
 	r.Patch("/{contactID}", h.Update)
@@ -39,6 +41,37 @@ func (h *Handler) Routes() chi.Router {
 		r.Mount("/{contactID}/notes", h.notesRoute)
 	}
 	return r
+}
+
+type bulkEnsureRequest struct {
+	BusinessIDs []uuid.UUID `json:"business_ids"`
+}
+
+// EnsureBulkFromBusinesses takes a list of business IDs and creates
+// contacts for each — bucketing the result so the UI can show "added /
+// already existed / no email yet". Idempotent: re-running after the
+// user enters a missing email promotes that lead from no_email → added.
+func (h *Handler) EnsureBulkFromBusinesses(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req bulkEnsureRequest
+	if err := httputil.DecodeJSON(r, &req); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if len(req.BusinessIDs) == 0 {
+		httputil.WriteError(w, http.StatusBadRequest, "business_ids is required")
+		return
+	}
+	res, err := h.repo.EnsureBulkFromBusinesses(r.Context(), user.ID, req.BusinessIDs)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, res)
 }
 
 type bulkRequest struct {
@@ -113,6 +146,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stage := r.URL.Query().Get("stage")
+	marketID := r.URL.Query().Get("market_id")
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	if page < 1 {
 		page = 1
@@ -122,7 +156,21 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		pageSize = 50
 	}
 
-	contacts, total, err := h.repo.List(r.Context(), user.ID, stage, pageSize, (page-1)*pageSize)
+	var (
+		contacts []domain.Contact
+		total    int
+		err      error
+	)
+	if marketID != "" {
+		mid, perr := uuid.Parse(marketID)
+		if perr != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid market_id")
+			return
+		}
+		contacts, total, err = h.repo.ListByMarket(r.Context(), user.ID, mid, pageSize, (page-1)*pageSize)
+	} else {
+		contacts, total, err = h.repo.List(r.Context(), user.ID, stage, pageSize, (page-1)*pageSize)
+	}
 	if err != nil {
 		httputil.WriteError(w, http.StatusInternalServerError, "failed to list contacts")
 		return

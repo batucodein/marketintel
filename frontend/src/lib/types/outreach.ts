@@ -30,6 +30,8 @@ export interface UserChannel {
 }
 
 export interface SenderProfile {
+  id: string;
+  name: string;
   user_id: string;
   company_name: string;
   product_description: string;
@@ -38,6 +40,15 @@ export interface SenderProfile {
   tone: string;
   signature: string;
   physical_address: string;
+  // Targeting fields (free text — fed into the AI lead scorer so leads are
+  // ranked against this user's specific positioning).
+  target_industries: string;
+  target_countries: string;
+  avoid_countries: string;
+  min_deal_size_usd: number | null;
+  typical_deal_size_usd: number | null;
+  deal_breakers: string;
+  competitive_moats: string;
   default_channel_id: string | null;
   catalog_file_name?: string | null;
   catalog_mime_type?: string | null;
@@ -71,6 +82,10 @@ export interface ConversationListRow extends Conversation {
   business_name: string;
   last_message_snippet: string | null;
   message_count: number;
+  last_inbound_sentiment: string | null;
+  last_inbound_sentiment_score: number | null;
+  last_inbound_sentiment_label: SentimentLevel | null;
+  tags: string[];
 }
 
 export interface Message {
@@ -134,6 +149,10 @@ export interface Campaign {
   status: CampaignStatus;
   positioning_override?: Record<string, unknown> | null;
   sequence_id: string | null;
+  market_id: string | null;
+  sender_profile_id: string | null;
+  on_positive_action: string;
+  on_negative_action: string;
   send_pace_per_day: number;
   attach_catalog: boolean;
   start_at: string | null;
@@ -149,6 +168,7 @@ export interface CampaignSummary extends Campaign {
   approved_count: number;
   sent_count: number;
   replied_count: number;
+  cold_count: number;
   skipped_count: number;
   failed_count: number;
   total_count: number;
@@ -180,6 +200,19 @@ export interface AddContactsResult {
   added: number;
   skipped_overlap: string[];
   skipped_already_in_campaign: number;
+}
+
+// --- Bulk add-to-contacts result --------------------------------------
+
+export interface BulkEnsureItem {
+  business_id: string;
+  name: string;
+}
+
+export interface BulkEnsureResult {
+  added: BulkEnsureItem[];
+  already_existed: BulkEnsureItem[];
+  no_email: BulkEnsureItem[];
 }
 
 // --- Sequences -------------------------------------------------------
@@ -237,5 +270,136 @@ export interface Note {
   user_id: string;
   contact_id: string;
   body: string;
+  created_at: string;
+}
+
+// --- Contact groups ---------------------------------------------------
+
+export interface ContactGroup {
+  id: string;
+  user_id: string;
+  name: string;
+  sender_profile_id: string | null;
+  member_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// --- Email Groups -----------------------------------------------------
+// An Email Group is a campaign + its attached follow-up steps, presented as
+// one thing. These shapes mirror the backend group facade.
+
+// Sentiment is a continuous score (-1..1) surfaced as one of five levels.
+export type SentimentLevel =
+  | "very_negative"
+  | "negative"
+  | "neutral"
+  | "positive"
+  | "very_positive";
+
+// Status facet keys (status + derived buckets).
+export type StatusFacet = "replied" | "no_reply" | "cold" | "advanced";
+
+// EmailFacets is the multi-select filter: OR within a facet, AND across facets.
+export interface EmailFacets {
+  sentiment: SentimentLevel[];
+  tags: string[];
+  status: StatusFacet[];
+}
+
+export interface GroupSummary extends CampaignSummary {
+  contact_group_id: string | null;
+  contact_group_name: string;
+  brand_id: string | null;
+  brand_name: string;
+  sender_email: string;
+}
+
+export interface GroupDetail extends GroupSummary {
+  steps: SequenceStep[];
+  facet_counts: Record<string, number>;
+  notifications: Task[];
+}
+
+export interface GroupEmail {
+  contact_id: string;
+  contact_name: string;
+  contact_email: string | null;
+  business_name: string;
+  conversation_id: string | null;
+  subject: string | null;
+  status: CampaignContactStatus;
+  last_direction: "in" | "out" | null;
+  last_message_at: string | null;
+  sentiment: string | null;
+  sentiment_score: number | null;
+  sentiment_label: SentimentLevel | null;
+  tags: string[];
+  unread: boolean;
+  has_pending_draft: boolean;
+  scheduled_send_at: string | null;
+  current_step: number | null;
+  next_run_at: string | null;
+}
+
+export interface FunnelStep {
+  step: number;
+  label: string;
+  sent: number;
+  pct: number;
+}
+
+export interface UpcomingDay {
+  date: string;
+  cold: number;
+  followup: number;
+}
+
+export interface CadenceStats {
+  total_contacts: number;
+  funnel: FunnelStep[];
+  exits: Record<string, number>;
+  completion_pct: number;
+  upcoming: UpcomingDay[];
+}
+
+// ConvTag is a stored intent tag with its provenance (ai|manual).
+export interface ConvTag {
+  tag: string;
+  source: "ai" | "manual";
+  confidence: number | null;
+}
+
+// PlaybookEntry is one authored per-tag reply instruction for a group.
+export interface PlaybookEntry {
+  tag: string;
+  instruction: string;
+}
+
+// AssistantAction is a write the agent proposes (the user confirms it).
+export interface AssistantAction {
+  type: "edit_drafts" | "add_playbook" | "remove_playbook";
+  scope?: "cold" | "reply" | "reply_positive" | "reply_negative" | "all";
+  instruction?: string;
+  tag?: string;
+}
+
+// AssistantMessage is one turn in the group's draft-assistant chat thread.
+export interface AssistantMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  proposed_action?: AssistantAction | null;
+  status: "sent" | "proposed" | "applied" | "dismissed";
+  created_at: string;
+}
+
+// BrandLesson is a remembered per-brand reply instruction, matched by tags +
+// sentiment so it only applies to the same kind of buyer reply.
+export interface BrandLesson {
+  id: string;
+  instruction: string;
+  match_tags: string[];
+  match_sentiment: string;
   created_at: string;
 }

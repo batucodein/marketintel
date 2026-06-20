@@ -34,7 +34,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <MobileNav open={mobileOpen} onClose={() => setMobileOpen(false)} />
       <div className="flex flex-1 flex-col overflow-hidden">
         <Topbar onMenuClick={() => setMobileOpen(true)} />
-        <main className="flex-1 overflow-auto p-4 lg:p-6 bg-slate-50">{children}</main>
+        <main className="flex-1 overflow-auto p-4 lg:p-6 bg-background">{children}</main>
       </div>
     </div>
   );

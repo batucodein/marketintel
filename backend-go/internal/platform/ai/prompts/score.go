@@ -82,6 +82,18 @@ THEN apply data_completeness cap:
 - If data_completeness ≤ 0.4: cap overall_score at 60
 - If data_completeness ≤ 0.6: cap overall_score at 75
 
+## SENDER POSITIONING (when provided)
+The input may include a "sender" block describing THIS user's specific positioning. When present, use it to break ties and adjust dimensions:
+- "target_industries": leads clearly inside the user's target industries get +5 to fit_score; leads clearly outside get -10 to fit.
+- "target_countries": leads NOT in the user's target countries get -10 to fit_score. If "global" or empty, no adjustment.
+- "avoid_countries": leads in these countries get fit_score capped at 20 AND overall_score capped at 35 (hard negative — the user said they don't sell there).
+- "min_deal_size_usd": if the lead's likely deal size from its shipment data is clearly below this floor, deal_size_potential ≤ 30.
+- "typical_deal_size_usd": use as the calibration anchor for the deal_size band — a lead doing ~10× this is "major buyer", doing ~0.5× is "small".
+- "deal_breakers": if any breaker clearly applies (based on industry/profile), overall_score ≤ 30 AND name the specific breaker in weaknesses.
+- "competitive_moats": when explaining strengths/recommended_approach, reference how the user's moats apply to THIS specific lead — don't just restate them.
+
+If the sender block is absent or empty, score against the market product as before.
+
 ## DIMENSION-LEVEL DATA QUALITY (CRITICAL)
 For EACH lead, the input includes a "field_availability" object listing which canonical fields the source upload actually carried for this row (e.g. {"consignee_email": false, "total_value_usd": true, ...}). You MUST emit a "dimension_completeness" object alongside the sub-scores indicating, per dimension, how much of that dimension's score is grounded in real data vs. inferred:
 
@@ -96,6 +108,9 @@ You may NOT compensate for missing fields by inferring from name or industry. Be
 Always respond with valid JSON only, no markdown fences.`
 
 const scoreTemplate = `Score the following businesses as potential buyers for "%s" (HS Code: %s) from an exporter.
+
+## Sender (the user's positioning — use to filter and adjust scores)
+%s
 
 ## Market Context
 %s
@@ -154,7 +169,36 @@ type ScorePrompt struct {
 	Prompt string
 }
 
-func BuildScorePrompt(businesses []ScoreBusiness, productQuery, hsCode, marketContext, tradeContext string) ScorePrompt {
+// SenderPositioning is the optional user-positioning block fed to the
+// scorer. All fields free-text — the AI interprets them. Empty values
+// are dropped before the JSON is rendered into the prompt so the model
+// doesn't waste attention on noise.
+type SenderPositioning struct {
+	CompanyName            string `json:"company_name,omitempty"`
+	ProductDescription     string `json:"product_description,omitempty"`
+	ValueProp              string `json:"value_prop,omitempty"`
+	TargetBuyerDescription string `json:"target_buyer_description,omitempty"`
+	TargetIndustries       string `json:"target_industries,omitempty"`
+	TargetCountries        string `json:"target_countries,omitempty"`
+	AvoidCountries         string `json:"avoid_countries,omitempty"`
+	MinDealSizeUSD         *int64 `json:"min_deal_size_usd,omitempty"`
+	TypicalDealSizeUSD     *int64 `json:"typical_deal_size_usd,omitempty"`
+	DealBreakers           string `json:"deal_breakers,omitempty"`
+	CompetitiveMoats       string `json:"competitive_moats,omitempty"`
+}
+
+// IsEmpty reports whether the positioning block carries no useful info.
+// When true, BuildScorePrompt renders "(none provided)" so the system
+// prompt's "if absent, score against market product" branch kicks in.
+func (s SenderPositioning) IsEmpty() bool {
+	return s.CompanyName == "" && s.ProductDescription == "" && s.ValueProp == "" &&
+		s.TargetBuyerDescription == "" && s.TargetIndustries == "" &&
+		s.TargetCountries == "" && s.AvoidCountries == "" &&
+		s.MinDealSizeUSD == nil && s.TypicalDealSizeUSD == nil &&
+		s.DealBreakers == "" && s.CompetitiveMoats == ""
+}
+
+func BuildScorePrompt(businesses []ScoreBusiness, productQuery, hsCode, marketContext, tradeContext string, sender SenderPositioning) ScorePrompt {
 	if hsCode == "" {
 		hsCode = "N/A"
 	}
@@ -165,12 +209,20 @@ func BuildScorePrompt(businesses []ScoreBusiness, productQuery, hsCode, marketCo
 		tradeContext = "No trade flow data available yet."
 	}
 
+	senderBlock := "(none provided — score against the market product only)"
+	if !sender.IsEmpty() {
+		if b, err := json.MarshalIndent(sender, "", "  "); err == nil {
+			senderBlock = string(b)
+		}
+	}
+
 	bizJSON, _ := json.MarshalIndent(businesses, "", "  ")
 
 	return ScorePrompt{
 		System: withPreamble(scoreSystem),
 		Prompt: fmt.Sprintf(scoreTemplate,
 			productQuery, hsCode,
+			senderBlock,
 			marketContext,
 			tradeContext,
 			string(bizJSON),

@@ -17,11 +17,20 @@ import (
 )
 
 // Repository is the scoring module's data access interface.
+//
+// Markets have no user_id column — a market is owned by the user whose searches
+// reference it (searches.query->market_ids; searches.user_id). Every read/write
+// of a specific market is therefore scoped to userID to prevent cross-tenant
+// access (see marketOwnedClause).
 type Repository interface {
 	// Markets
-	GetMarket(ctx context.Context, id uuid.UUID) (*domain.Market, error)
-	ListMarkets(ctx context.Context) ([]domain.Market, error)
+	GetMarket(ctx context.Context, userID, id uuid.UUID) (*domain.Market, error)
+	ListMarkets(ctx context.Context, userID uuid.UUID) ([]domain.Market, error)
+	UserOwnsMarket(ctx context.Context, userID, marketID uuid.UUID) (bool, error)
 	UpdateMarketScores(ctx context.Context, id uuid.UUID, demandScore, saturationScore float64, estimatedSize int64) error
+	// SetMarketSenderProfile assigns the market's fixed brand. Both the market
+	// and the brand must belong to userID (validated in-query). profileID=nil clears.
+	SetMarketSenderProfile(ctx context.Context, marketID uuid.UUID, userID uuid.UUID, profileID *uuid.UUID) error
 
 	// Market Analysis
 
@@ -29,7 +38,7 @@ type Repository interface {
 	UpsertRanking(ctx context.Context, r *domain.MarketRanking) error
 	ListRankings(ctx context.Context, userID, categoryID uuid.UUID) ([]domain.MarketRanking, error)
 
-	DeleteMarket(ctx context.Context, id uuid.UUID) error
+	DeleteMarket(ctx context.Context, userID, id uuid.UUID) error
 
 	// Leads
 	ListLeads(ctx context.Context, marketID, userID uuid.UUID, minScore, page, pageSize int) ([]domain.BusinessWithRelevance, int, error)
@@ -46,15 +55,34 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 	return &repository{pool: pool}
 }
 
-func (r *repository) GetMarket(ctx context.Context, id uuid.UUID) (*domain.Market, error) {
+// UserOwnsMarket reports whether the market belongs to the user.
+func (r *repository) UserOwnsMarket(ctx context.Context, userID, marketID uuid.UUID) (bool, error) {
+	var ok bool
+	err := r.pool.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM searches s
+		   WHERE s.user_id = $1
+		     AND s.query @> jsonb_build_object('market_ids', jsonb_build_array($2::text)))`,
+		userID, marketID,
+	).Scan(&ok)
+	return ok, err
+}
+
+func (r *repository) GetMarket(ctx context.Context, userID, id uuid.UUID) (*domain.Market, error) {
 	row := r.pool.QueryRow(ctx,
 		`SELECT id, name, country_code, region, city, latitude, longitude, radius_km,
 		        product_category_id, estimated_market_size, saturation_score, demand_score,
 		        last_analyzed_at, derived_product_name, dominant_hs_code, all_hs_codes,
 		        origin_country, origin_countries, origin_share,
 		        shipment_from_date, shipment_to_date, importer_count, shipment_count,
-		        source_file_name, uploaded_at, created_at, updated_at
-		 FROM markets WHERE id = $1`, id,
+		        source_file_name, uploaded_at, sender_profile_id, created_at, updated_at
+		 FROM markets m
+		 WHERE id = $1
+		   AND EXISTS (
+		     SELECT 1 FROM searches s
+		     WHERE s.user_id = $2
+		       AND s.query @> jsonb_build_object('market_ids', jsonb_build_array(m.id::text)))`,
+		id, userID,
 	)
 	var m domain.Market
 	err := row.Scan(&m.ID, &m.Name, &m.CountryCode, &m.Region, &m.City,
@@ -63,7 +91,7 @@ func (r *repository) GetMarket(ctx context.Context, id uuid.UUID) (*domain.Marke
 		&m.LastAnalyzedAt, &m.DerivedProductName, &m.DominantHSCode, &m.AllHSCodes,
 		&m.OriginCountry, &m.OriginCountries, &m.OriginShare,
 		&m.ShipmentFromDate, &m.ShipmentToDate, &m.ImporterCount, &m.ShipmentCount,
-		&m.SourceFileName, &m.UploadedAt, &m.CreatedAt, &m.UpdatedAt)
+		&m.SourceFileName, &m.UploadedAt, &m.SenderProfileID, &m.CreatedAt, &m.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrNotFound
 	}
@@ -73,20 +101,22 @@ func (r *repository) GetMarket(ctx context.Context, id uuid.UUID) (*domain.Marke
 	return &m, nil
 }
 
-func (r *repository) ListMarkets(ctx context.Context) ([]domain.Market, error) {
+func (r *repository) ListMarkets(ctx context.Context, userID uuid.UUID) ([]domain.Market, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT m.id, m.name, m.country_code, m.region, m.city, m.latitude, m.longitude, m.radius_km,
 		        m.product_category_id, m.estimated_market_size, m.saturation_score, m.demand_score,
 		        m.last_analyzed_at, m.derived_product_name, m.dominant_hs_code, m.all_hs_codes,
 		        m.origin_country, m.origin_countries, m.origin_share,
 		        m.shipment_from_date, m.shipment_to_date, m.importer_count, m.shipment_count,
-		        m.source_file_name, m.uploaded_at, m.created_at, m.updated_at
+		        m.source_file_name, m.uploaded_at, m.sender_profile_id, m.created_at, m.updated_at
 		 FROM markets m
 		 WHERE EXISTS (
 		   SELECT 1 FROM searches s
-		   WHERE s.query @> jsonb_build_object('market_ids', jsonb_build_array(m.id::text))
+		   WHERE s.user_id = $1
+		     AND s.query @> jsonb_build_object('market_ids', jsonb_build_array(m.id::text))
 		 )
 		 ORDER BY m.created_at DESC`,
+		userID,
 	)
 	if err != nil {
 		return nil, err
@@ -102,7 +132,7 @@ func (r *repository) ListMarkets(ctx context.Context) ([]domain.Market, error) {
 			&m.LastAnalyzedAt, &m.DerivedProductName, &m.DominantHSCode, &m.AllHSCodes,
 			&m.OriginCountry, &m.OriginCountries, &m.OriginShare,
 			&m.ShipmentFromDate, &m.ShipmentToDate, &m.ImporterCount, &m.ShipmentCount,
-			&m.SourceFileName, &m.UploadedAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			&m.SourceFileName, &m.UploadedAt, &m.SenderProfileID, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
 		markets = append(markets, m)
@@ -121,14 +151,59 @@ func (r *repository) UpdateMarketScores(ctx context.Context, id uuid.UUID, deman
 	return err
 }
 
-func (r *repository) DeleteMarket(ctx context.Context, id uuid.UUID) error {
+func (r *repository) SetMarketSenderProfile(ctx context.Context, marketID uuid.UUID, userID uuid.UUID, profileID *uuid.UUID) error {
+	// Both branches gate on market ownership (the user's search references it).
+	owns, err := r.UserOwnsMarket(ctx, userID, marketID)
+	if err != nil {
+		return err
+	}
+	if !owns {
+		return domain.ErrNotFound
+	}
+	if profileID == nil {
+		_, err := r.pool.Exec(ctx,
+			`UPDATE markets SET sender_profile_id = NULL, updated_at = now() WHERE id = $1`,
+			marketID,
+		)
+		return err
+	}
+	// Only set if the brand belongs to the acting user.
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE markets SET sender_profile_id = $1, updated_at = now()
+		 WHERE id = $2
+		   AND EXISTS (SELECT 1 FROM sender_profiles WHERE id = $1 AND user_id = $3)`,
+		*profileID, marketID, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("set market brand: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+func (r *repository) DeleteMarket(ctx context.Context, userID, id uuid.UUID) error {
+	// Ownership gate: only the user whose search owns this market may delete it.
+	owns, err := r.UserOwnsMarket(ctx, userID, id)
+	if err != nil {
+		return err
+	}
+	if !owns {
+		return domain.ErrNotFound
+	}
+
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	for _, table := range []string{"lead_scores", "market_analyses", "competitors", "business_markets"} {
+	// NOTE: lead_scores is intentionally NOT deleted here — those are the AI's
+	// buyer-fit analysis, looked up by (business_id, user_id) at draft time.
+	// The FK on lead_scores.market_id is ON DELETE SET NULL, so scores survive
+	// market deletion (just unlinked from the gone market).
+	for _, table := range []string{"market_analyses", "competitors", "business_markets"} {
 		if _, err := tx.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE market_id = $1", table), id); err != nil {
 			return fmt.Errorf("delete %s: %w", table, err)
 		}

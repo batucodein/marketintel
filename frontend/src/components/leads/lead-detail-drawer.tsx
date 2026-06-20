@@ -32,8 +32,11 @@ export function LeadDetailDrawer({ lead, marketId, onClose, onLeadUpdated }: Lea
   const [emailing, setEmailing] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
 
-  // Inline edit state for contact info.
+  // Inline edit state for contact info. The parent keys this component by
+  // lead id, so this state can't survive a lead switch; editingLeadID is a
+  // second line of defense so a stale form can never save onto another lead.
   const [editing, setEditing] = useState(false);
+  const [editingLeadID, setEditingLeadID] = useState<string | null>(null);
   const [editEmail, setEditEmail] = useState("");
   const [editPhone, setEditPhone] = useState("");
   const [editWebsite, setEditWebsite] = useState("");
@@ -45,12 +48,19 @@ export function LeadDetailDrawer({ lead, marketId, onClose, onLeadUpdated }: Lea
     setEditEmail(lead.email ?? "");
     setEditPhone(lead.phone ?? "");
     setEditWebsite(lead.website ?? "");
+    setEditingLeadID(lead.id);
     setEditing(true);
     setContactError(null);
   }
 
   async function saveContact() {
     if (!lead || !marketId) return;
+    if (editingLeadID !== lead.id) {
+      // The form was opened for a different lead — never write its values here.
+      setEditing(false);
+      setContactError("The lead changed while editing — please reopen the edit form.");
+      return;
+    }
     setSavingContact(true);
     setContactError(null);
     try {

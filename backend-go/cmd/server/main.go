@@ -24,11 +24,15 @@ import (
 	outreachcampaign "github.com/batuhan/marketintel/internal/outreach/campaign"
 	outreachchannel "github.com/batuhan/marketintel/internal/outreach/channel"
 	gmailmailer "github.com/batuhan/marketintel/internal/outreach/channel/gmail"
+	imapsmtp "github.com/batuhan/marketintel/internal/outreach/channel/imapsmtp"
 	outreachcompliance "github.com/batuhan/marketintel/internal/outreach/compliance"
 	outreachcontact "github.com/batuhan/marketintel/internal/outreach/contact"
 	outreachconv "github.com/batuhan/marketintel/internal/outreach/conversation"
+	outreachcontactgroup "github.com/batuhan/marketintel/internal/outreach/contactgroup"
 	outreachcrm "github.com/batuhan/marketintel/internal/outreach/crm"
 	outreachevents "github.com/batuhan/marketintel/internal/outreach/events"
+	outreachgroup "github.com/batuhan/marketintel/internal/outreach/group"
+	outreachsimulation "github.com/batuhan/marketintel/internal/outreach/simulation"
 	"github.com/batuhan/marketintel/internal/outreach/internalsched"
 	outreachleadctx "github.com/batuhan/marketintel/internal/outreach/leadctx"
 	outreachpoller "github.com/batuhan/marketintel/internal/outreach/poller"
@@ -180,6 +184,11 @@ func main() {
 		slog.Warn("gmail oauth not configured — set GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET to enable")
 	}
 
+	// Generic IMAP/SMTP mailbox channel — lets users connect any custom-domain /
+	// any-provider account with stored (encrypted) credentials. No external app
+	// creds needed; the factory just decrypts per-channel config.
+	outreachchannel.DefaultRegistry.Register(domain.ChannelTypeSMTP, imapsmtp.NewFactory(tokenCipher))
+
 	// CORS origins list is comma-or-json; take the first HTTP/HTTPS one for the
 	// post-OAuth redirect target. Fallback to localhost:3000.
 	frontendURL := "http://localhost:3000"
@@ -192,10 +201,15 @@ func main() {
 
 	senderRepo := outreachsender.NewRepository(pool)
 	senderHandler := outreachsender.NewHandler(senderRepo)
+
+	// Plug sender profile into the discovery scorer so leads are ranked
+	// against the user's specific positioning (target industries/countries,
+	// deal-size band, deal breakers, moats) on top of market fit.
+	pipeline.SetSenderLoader(senderRepo)
 	contactRepo := outreachcontact.NewRepository(pool)
 	contactHandler := outreachcontact.NewHandler(contactRepo)
 	channelRepo := outreachchannel.NewRepository(pool)
-	channelHandler := outreachchannel.NewHandler(channelRepo, gmailOAuth, tokenCipher, frontendURL)
+	channelHandler := outreachchannel.NewHandler(channelRepo, gmailOAuth, tokenCipher, imapsmtp.NewConnector(tokenCipher), frontendURL)
 	convRepo := outreachconv.NewRepository(pool)
 	convService := outreachconv.NewService(convRepo, channelRepo, contactRepo, senderRepo, outreachchannel.DefaultRegistry, aiRouter, pool)
 	convHandler := outreachconv.NewHandler(convRepo, convService)
@@ -216,12 +230,17 @@ func main() {
 	)
 	campaignHandler := outreachcampaign.NewHandler(campaignRepo, campaignSvc)
 
+	// CRM extras (P4) — tasks + notes. Constructed before the sequence
+	// engine because the engine records notify_user actions as task rows.
+	crmRepo := outreachcrm.NewRepository(pool)
+	crmHandler := outreachcrm.NewHandler(crmRepo)
+
 	// Sequences (P3) — handler + engine.
 	sequenceRepo := outreachsequence.NewRepository(pool)
 	sequenceSvc := outreachsequence.NewService(sequenceRepo)
 	sequenceHandler := outreachsequence.NewHandler(sequenceRepo, sequenceSvc)
 	sequenceEngine := outreachsequence.NewEngine(
-		sequenceRepo, convRepo, contactRepo, channelRepo, senderRepo,
+		sequenceRepo, convRepo, contactRepo, channelRepo, senderRepo, crmRepo,
 		outreachchannel.DefaultRegistry, aiRouter, leadCtxLoader, pool,
 		cfg.PublicAPIURL,
 	)
@@ -229,22 +248,36 @@ func main() {
 	// Bind the campaign service's sequence starter so that successful
 	// campaign sends kick off a follow-up run when sequence_id is set.
 	campaignSvc.SetSequenceStarter(sequenceSvc)
+	// Let the draft assistant rewrite reply drafts via the conversation
+	// reply prompt + guard (campaign already imports conversation; no cycle).
+	campaignSvc.SetConvRefiner(convService)
 
-	// CRM extras (P4) — tasks + notes.
-	crmRepo := outreachcrm.NewRepository(pool)
-	crmHandler := outreachcrm.NewHandler(crmRepo)
+	// Contact groups — named collections of contacts with a brand.
+	contactGroupRepo := outreachcontactgroup.NewRepository(pool)
+	contactGroupSvc := outreachcontactgroup.NewService(contactGroupRepo, contactRepo)
+	contactGroupHandler := outreachcontactgroup.NewHandler(contactGroupRepo, contactGroupSvc, contactRepo)
+
+	// Email Groups (P5) — facade over campaign + sequence + contact(group).
+	groupSvc := outreachgroup.NewService(campaignSvc, campaignRepo, sequenceSvc, contactRepo, contactGroupRepo, pool)
+	groupHandler := outreachgroup.NewHandler(groupSvc)
 
 	// Realtime SSE broker — poller publishes inbound events here.
 	eventBroker := outreachevents.NewBroker()
 	eventsHandler := outreachevents.NewHandler(eventBroker)
+	groupSvc.SetBroker(eventBroker) // directive bulk-apply progress events
 
-	outreachHandler := outreach.NewHandler(senderHandler, contactHandler, channelHandler, convHandler, campaignHandler, sequenceHandler, crmHandler, eventsHandler, complianceHandler)
+	// Simulation Lab — AI-persona test runs. Self-contained: no real sends.
+	simulationRepo := outreachsimulation.NewRepository(pool)
+	simulationSvc := outreachsimulation.NewService(simulationRepo, scoringRepo, leadCtxLoader, senderRepo, aiRouter, eventBroker)
+	simulationHandler := outreachsimulation.NewHandler(simulationRepo, simulationSvc)
+
+	outreachHandler := outreach.NewHandler(senderHandler, contactHandler, channelHandler, convHandler, campaignHandler, sequenceHandler, groupHandler, contactGroupHandler, simulationHandler, crmHandler, eventsHandler, complianceHandler)
 
 	// Inbound poller — wrapped as a Tickable component instead of running as
 	// a long-lived goroutine. Cloud Scheduler drives the cadence in prod via
 	// POST /internal/scheduler/tick; locally a dev can hit the endpoint with
 	// the same INTERNAL_API_TOKEN, or curl /internal/scheduler/tick on demand.
-	mailPoller := outreachpoller.NewPoller(channelRepo, outreachchannel.DefaultRegistry, convRepo, contactRepo, eventBroker, pool, 2*time.Minute)
+	mailPoller := outreachpoller.NewPoller(channelRepo, outreachchannel.DefaultRegistry, convRepo, contactRepo, eventBroker, aiRouter, pool, 2*time.Minute)
 
 	internalHandler := internalsched.NewHandler()
 	internalHandler.Register(&internalsched.PollerComponent{P: mailPoller})

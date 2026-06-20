@@ -3,6 +3,7 @@ import { Fira_Code, Fira_Sans } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/lib/providers/auth-provider";
 import { SWRProvider } from "@/lib/providers/swr-provider";
+import { ThemeProvider, themeInitScript } from "@/lib/providers/theme-provider";
 import "./globals.css";
 
 const firaSans = Fira_Sans({
@@ -28,13 +29,18 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${firaSans.variable} ${firaCode.variable} h-full antialiased`}>
+    <html lang="en" className={`${firaSans.variable} ${firaCode.variable} h-full antialiased`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+      </head>
       <body className="min-h-full flex flex-col font-sans bg-background text-foreground">
-        <AuthProvider>
-          <SWRProvider>
-            <TooltipProvider>{children}</TooltipProvider>
-          </SWRProvider>
-        </AuthProvider>
+        <ThemeProvider>
+          <AuthProvider>
+            <SWRProvider>
+              <TooltipProvider>{children}</TooltipProvider>
+            </SWRProvider>
+          </AuthProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

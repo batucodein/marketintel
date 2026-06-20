@@ -17,9 +17,10 @@ import (
 
 // Kind enumerates the event types subscribers may receive.
 const (
-	KindInbound          = "inbound"           // a new inbound message landed
-	KindConversationRead = "conversation_read" // user marked a conversation read elsewhere
-	KindCampaignProgress = "campaign_progress" // drafter/scheduler bumped a campaign counter
+	KindInbound            = "inbound"             // a new inbound message landed
+	KindConversationRead   = "conversation_read"   // user marked a conversation read elsewhere
+	KindCampaignProgress   = "campaign_progress"   // drafter/scheduler bumped a campaign counter
+	KindSimulationProgress = "simulation_progress" // a simulation lead finished
 )
 
 // Event is the payload pushed to subscribers. UserID is used purely for

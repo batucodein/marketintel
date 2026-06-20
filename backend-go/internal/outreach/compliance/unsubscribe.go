@@ -102,9 +102,41 @@ func IsSuppressed(c *domain.Contact) bool {
 	return c != nil && c.UnsubscribedAt != nil
 }
 
+// StripQuotedReply returns only the NEW text of an inbound reply: everything
+// from the first quoted-history marker onward is dropped. Critical because our
+// own outbound footer contains the word "Unsubscribe" — scanning a reply that
+// quotes it would suppress every warm lead (and contaminate AI classification).
+// Markers handled: ">"-quoted lines, "On ... wrote:" attribution lines, the
+// "---" footer separator we append, Outlook's original-message separators, and
+// a bare "Unsubscribe:" footer line.
+func StripQuotedReply(body string) string {
+	if body == "" {
+		return ""
+	}
+	lines := strings.Split(body, "\n")
+	var kept []string
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, ">"):
+			return strings.TrimSpace(strings.Join(kept, "\n"))
+		case strings.HasPrefix(t, "On ") && strings.HasSuffix(t, "wrote:"):
+			return strings.TrimSpace(strings.Join(kept, "\n"))
+		case t == "---" || t == "--" || strings.HasPrefix(t, "-----Original Message-----") ||
+			strings.HasPrefix(t, "________________________________"):
+			return strings.TrimSpace(strings.Join(kept, "\n"))
+		case strings.HasPrefix(t, "Unsubscribe: http"):
+			return strings.TrimSpace(strings.Join(kept, "\n"))
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
 // LooksLikeOptOut returns true when the body of an inbound message contains
 // language we should treat as an unsubscribe request. Conservative — false
-// positives lock a contact out of further outreach.
+// positives lock a contact out of further outreach. Callers MUST pass the
+// stripped new-text portion (StripQuotedReply), never the raw body.
 func LooksLikeOptOut(body string) bool {
 	if body == "" {
 		return false

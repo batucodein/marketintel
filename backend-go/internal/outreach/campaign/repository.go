@@ -81,12 +81,14 @@ func (r *repository) Create(ctx context.Context, c domain.Campaign) (*domain.Cam
 	}
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO campaigns (id, user_id, channel_id, name, goal, status,
-		                         positioning_override, sequence_id, send_pace_per_day,
-		                         attach_catalog, start_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		                         positioning_override, sequence_id, market_id, contact_group_id, sender_profile_id,
+		                         on_positive_action, on_negative_action,
+		                         send_pace_per_day, attach_catalog, start_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
 		c.ID, c.UserID, c.ChannelID, c.Name, c.Goal, c.Status,
-		c.PositioningOverride, c.SequenceID, c.SendPacePerDay,
-		c.AttachCatalog, c.StartAt,
+		c.PositioningOverride, c.SequenceID, c.MarketID, c.ContactGroupID, c.SenderProfileID,
+		defaultStr(c.OnPositiveAction, domain.OnPositiveAutoDraftReply), defaultStr(c.OnNegativeAction, domain.OnNegativeMarkCold),
+		c.SendPacePerDay, c.AttachCatalog, c.StartAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert campaign: %w", err)
@@ -97,7 +99,8 @@ func (r *repository) Create(ctx context.Context, c domain.Campaign) (*domain.Cam
 func (r *repository) Get(ctx context.Context, userID, id uuid.UUID) (*domain.Campaign, error) {
 	return r.scanCampaign(ctx,
 		`SELECT id, user_id, channel_id, name, goal, status,
-		        positioning_override, sequence_id, send_pace_per_day,
+		        positioning_override, sequence_id, market_id, contact_group_id, sender_profile_id,
+		        on_positive_action, on_negative_action, send_pace_per_day,
 		        attach_catalog, start_at, started_at, completed_at,
 		        created_at, updated_at
 		 FROM campaigns WHERE id = $1 AND user_id = $2`,
@@ -108,7 +111,8 @@ func (r *repository) Get(ctx context.Context, userID, id uuid.UUID) (*domain.Cam
 func (r *repository) GetUnscoped(ctx context.Context, id uuid.UUID) (*domain.Campaign, error) {
 	return r.scanCampaign(ctx,
 		`SELECT id, user_id, channel_id, name, goal, status,
-		        positioning_override, sequence_id, send_pace_per_day,
+		        positioning_override, sequence_id, market_id, contact_group_id, sender_profile_id,
+		        on_positive_action, on_negative_action, send_pace_per_day,
 		        attach_catalog, start_at, started_at, completed_at,
 		        created_at, updated_at
 		 FROM campaigns WHERE id = $1`,
@@ -120,7 +124,8 @@ func (r *repository) scanCampaign(ctx context.Context, q string, args ...any) (*
 	var c domain.Campaign
 	err := r.pool.QueryRow(ctx, q, args...).Scan(
 		&c.ID, &c.UserID, &c.ChannelID, &c.Name, &c.Goal, &c.Status,
-		&c.PositioningOverride, &c.SequenceID, &c.SendPacePerDay,
+		&c.PositioningOverride, &c.SequenceID, &c.MarketID, &c.ContactGroupID, &c.SenderProfileID,
+		&c.OnPositiveAction, &c.OnNegativeAction, &c.SendPacePerDay,
 		&c.AttachCatalog, &c.StartAt, &c.StartedAt, &c.CompletedAt,
 		&c.CreatedAt, &c.UpdatedAt,
 	)
@@ -136,7 +141,8 @@ func (r *repository) scanCampaign(ctx context.Context, q string, args ...any) (*
 func (r *repository) List(ctx context.Context, userID uuid.UUID) ([]domain.Campaign, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT id, user_id, channel_id, name, goal, status,
-		        positioning_override, sequence_id, send_pace_per_day,
+		        positioning_override, sequence_id, market_id, contact_group_id, sender_profile_id,
+		        on_positive_action, on_negative_action, send_pace_per_day,
 		        attach_catalog, start_at, started_at, completed_at,
 		        created_at, updated_at
 		 FROM campaigns WHERE user_id = $1 ORDER BY created_at DESC`,
@@ -151,7 +157,8 @@ func (r *repository) List(ctx context.Context, userID uuid.UUID) ([]domain.Campa
 		var c domain.Campaign
 		if err := rows.Scan(
 			&c.ID, &c.UserID, &c.ChannelID, &c.Name, &c.Goal, &c.Status,
-			&c.PositioningOverride, &c.SequenceID, &c.SendPacePerDay,
+			&c.PositioningOverride, &c.SequenceID, &c.MarketID, &c.ContactGroupID, &c.SenderProfileID,
+			&c.OnPositiveAction, &c.OnNegativeAction, &c.SendPacePerDay,
 			&c.AttachCatalog, &c.StartAt, &c.StartedAt, &c.CompletedAt,
 			&c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
@@ -160,6 +167,15 @@ func (r *repository) List(ctx context.Context, userID uuid.UUID) ([]domain.Campa
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// defaultStr returns def when s is empty — keeps NOT NULL columns satisfied
+// for campaigns created before the branch-action columns existed.
+func defaultStr(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }
 
 func (r *repository) Update(ctx context.Context, c domain.Campaign) (*domain.Campaign, error) {
@@ -171,10 +187,13 @@ func (r *repository) Update(ctx context.Context, c domain.Campaign) (*domain.Cam
 		   send_pace_per_day = $5,
 		   attach_catalog = $6,
 		   start_at = $7,
+		   on_positive_action = $8,
+		   on_negative_action = $9,
 		   updated_at = now()
-		 WHERE id = $8 AND user_id = $9`,
+		 WHERE id = $10 AND user_id = $11`,
 		c.Name, c.Goal, c.PositioningOverride, c.SequenceID,
 		c.SendPacePerDay, c.AttachCatalog, c.StartAt,
+		defaultStr(c.OnPositiveAction, domain.OnPositiveAutoDraftReply), defaultStr(c.OnNegativeAction, domain.OnNegativeMarkCold),
 		c.ID, c.UserID,
 	)
 	if err != nil {
@@ -196,12 +215,45 @@ func (r *repository) UpdateStatus(ctx context.Context, userID, id uuid.UUID, sta
 	return err
 }
 
+// Delete removes a campaign in any status. The cascade on
+// campaign_contacts.campaign_id wipes every scheduled / approved /
+// drafted row — so the scheduler immediately stops firing for it (next
+// tick has nothing to find).
+//
+// Side cleanup: drafter-created placeholder conversations (status=paused
+// with no sent messages) are deleted too — they have no recipient who
+// ever saw anything, and leaving them behind clutters the inbox view's
+// underlying data set. Conversations that have at least one sent or
+// received message are kept (campaign_id becomes NULL via the FK's
+// ON DELETE SET NULL), preserving real email history.
 func (r *repository) Delete(ctx context.Context, userID, id uuid.UUID) error {
-	_, err := r.pool.Exec(ctx,
-		`DELETE FROM campaigns WHERE id = $1 AND user_id = $2 AND status = 'draft'`,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Drop never-sent placeholder conversations spawned by the drafter.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM conversations
+		 WHERE campaign_id = $1
+		   AND status = 'paused'
+		   AND NOT EXISTS (
+		     SELECT 1 FROM messages m
+		     WHERE m.conversation_id = conversations.id AND m.status = 'sent'
+		   )`,
+		id,
+	); err != nil {
+		return fmt.Errorf("cleanup paused conversations: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM campaigns WHERE id = $1 AND user_id = $2`,
 		id, userID,
-	)
-	return err
+	); err != nil {
+		return fmt.Errorf("delete campaign: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *repository) AddContacts(ctx context.Context, campaignID uuid.UUID, contactIDs []uuid.UUID, marketID *uuid.UUID) (int, error) {
@@ -332,7 +384,8 @@ func (r *repository) NextPending(ctx context.Context, limit int) ([]CampaignCont
 		`SELECT cc.campaign_id, cc.contact_id, cc.market_id, cc.status, cc.draft_message_id,
 		        cc.conversation_id, cc.scheduled_send_at, cc.sent_at, cc.replied_at, cc.skip_reason, cc.added_at,
 		        ca.id, ca.user_id, ca.channel_id, ca.name, ca.goal, ca.status,
-		        ca.positioning_override, ca.sequence_id, ca.send_pace_per_day,
+		        ca.positioning_override, ca.sequence_id, ca.market_id, ca.contact_group_id, ca.sender_profile_id,
+		        ca.on_positive_action, ca.on_negative_action, ca.send_pace_per_day,
 		        ca.attach_catalog, ca.start_at, ca.started_at, ca.completed_at, ca.created_at, ca.updated_at
 		 FROM campaign_contacts cc
 		 JOIN campaigns ca ON ca.id = cc.campaign_id
@@ -346,7 +399,8 @@ func (r *repository) NextDueForSend(ctx context.Context, now time.Time, limit in
 		`SELECT cc.campaign_id, cc.contact_id, cc.market_id, cc.status, cc.draft_message_id,
 		        cc.conversation_id, cc.scheduled_send_at, cc.sent_at, cc.replied_at, cc.skip_reason, cc.added_at,
 		        ca.id, ca.user_id, ca.channel_id, ca.name, ca.goal, ca.status,
-		        ca.positioning_override, ca.sequence_id, ca.send_pace_per_day,
+		        ca.positioning_override, ca.sequence_id, ca.market_id, ca.contact_group_id, ca.sender_profile_id,
+		        ca.on_positive_action, ca.on_negative_action, ca.send_pace_per_day,
 		        ca.attach_catalog, ca.start_at, ca.started_at, ca.completed_at, ca.created_at, ca.updated_at
 		 FROM campaign_contacts cc
 		 JOIN campaigns ca ON ca.id = cc.campaign_id
@@ -369,7 +423,8 @@ func (r *repository) queueQuery(ctx context.Context, q string, args ...any) ([]C
 			&x.CampaignID, &x.ContactID, &x.MarketID, &x.Status, &x.DraftMessageID,
 			&x.ConversationID, &x.ScheduledSendAt, &x.SentAt, &x.RepliedAt, &x.SkipReason, &x.AddedAt,
 			&x.Campaign.ID, &x.Campaign.UserID, &x.Campaign.ChannelID, &x.Campaign.Name, &x.Campaign.Goal, &x.Campaign.Status,
-			&x.Campaign.PositioningOverride, &x.Campaign.SequenceID, &x.Campaign.SendPacePerDay,
+			&x.Campaign.PositioningOverride, &x.Campaign.SequenceID, &x.Campaign.MarketID, &x.Campaign.ContactGroupID, &x.Campaign.SenderProfileID,
+			&x.Campaign.OnPositiveAction, &x.Campaign.OnNegativeAction, &x.Campaign.SendPacePerDay,
 			&x.Campaign.AttachCatalog, &x.Campaign.StartAt, &x.Campaign.StartedAt, &x.Campaign.CompletedAt,
 			&x.Campaign.CreatedAt, &x.Campaign.UpdatedAt,
 		); err != nil {
@@ -412,6 +467,8 @@ func (r *repository) Summary(ctx context.Context, userID, id uuid.UUID) (*domain
 			out.SentCount = n
 		case domain.CampaignContactReplied:
 			out.RepliedCount = n
+		case "cold":
+			out.ColdCount = n
 		case domain.CampaignContactSkipped:
 			out.SkippedCount = n
 		case domain.CampaignContactFailed:

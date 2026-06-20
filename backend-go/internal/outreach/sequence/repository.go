@@ -131,11 +131,17 @@ func (r *repository) ReplaceSteps(ctx context.Context, sequenceID uuid.UUID, ste
 		return err
 	}
 	for _, st := range steps {
+		// A cadence step is structurally the "no reply" path — replies are
+		// handled by the campaign reply branch, never by a step trigger. Reject
+		// anything else loudly instead of silently rewriting the user's config.
+		if st.Trigger != "" && st.Trigger != domain.SequenceTriggerNoReply {
+			return fmt.Errorf("step %d: trigger %q is not supported — cadence steps fire on no_reply only (replies are handled by the campaign reply branch)", st.StepNumber, st.Trigger)
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO sequence_steps (id, sequence_id, step_number, wait_days, trigger,
 			                              action, prompt_override, auto_send)
 			 VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)`,
-			sequenceID, st.StepNumber, st.WaitDays, st.Trigger, st.Action,
+			sequenceID, st.StepNumber, st.WaitDays, domain.SequenceTriggerNoReply, st.Action,
 			st.PromptOverride, st.AutoSend,
 		); err != nil {
 			return fmt.Errorf("insert step %d: %w", st.StepNumber, err)
@@ -210,10 +216,28 @@ func (r *repository) GetRun(ctx context.Context, id uuid.UUID) (*domain.Sequence
 }
 
 func (r *repository) DueRuns(ctx context.Context, now time.Time, limit int) ([]domain.SequenceRun, error) {
+	// Atomically CLAIM the due runs by pushing next_run_at forward 90s as we
+	// select them. Overlapping scheduler ticks (Cloud Scheduler retries, slow
+	// ticks) would otherwise pick up the same runs and double-fire actions
+	// (duplicate drafts, duplicate auto-sent emails). processOne overwrites
+	// next_run_at via Bump/Advance/Complete, so the claim never sticks.
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, sequence_id, conversation_id, current_step, next_run_at, status, last_error, created_at, updated_at
-		 FROM sequence_runs WHERE status = 'active' AND next_run_at <= $1
-		 ORDER BY next_run_at LIMIT $2`,
+		`UPDATE sequence_runs SET next_run_at = $1 + interval '90 seconds', updated_at = now()
+		 WHERE id IN (
+		   SELECT sr.id FROM sequence_runs sr
+		    WHERE sr.status = 'active' AND sr.next_run_at <= $1
+		      -- Don't fire follow-ups for a paused/ended group. Runs whose
+		      -- conversation has no campaign, or an active campaign, still fire.
+		      -- While paused the run isn't claimed, so its next_run_at stays
+		      -- frozen — Resume shifts it forward by the pause duration.
+		      AND NOT EXISTS (
+		        SELECT 1 FROM conversations cv JOIN campaigns ca ON ca.id = cv.campaign_id
+		         WHERE cv.id = sr.conversation_id AND ca.status <> 'active'
+		      )
+		    ORDER BY sr.next_run_at LIMIT $2
+		    FOR UPDATE SKIP LOCKED
+		 )
+		 RETURNING id, sequence_id, conversation_id, current_step, next_run_at, status, last_error, created_at, updated_at`,
 		now, limit,
 	)
 	if err != nil {

@@ -27,6 +27,9 @@ export interface Market {
   source_file_name: string | null;
   uploaded_at: string | null;
 
+  // The fixed brand (sender profile) this market sends as. Null until assigned.
+  sender_profile_id: string | null;
+
   created_at: string;
   updated_at: string;
 }

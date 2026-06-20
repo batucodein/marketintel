@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -21,6 +22,7 @@ type Repository interface {
 	List(ctx context.Context, userID uuid.UUID) ([]domain.UserChannel, error)
 	ListEnabled(ctx context.Context) ([]domain.UserChannel, error)
 	UpdateTokens(ctx context.Context, id uuid.UUID, accessCipher, refreshCipher string, expiresAt *time.Time) error
+	UpdateConfig(ctx context.Context, id uuid.UUID, config json.RawMessage) error
 	UpdateLastPoll(ctx context.Context, id uuid.UUID, at time.Time) error
 	Delete(ctx context.Context, userID, id uuid.UUID) error
 	SetDefault(ctx context.Context, userID, id uuid.UUID) error
@@ -138,6 +140,16 @@ func (r *repository) UpdateTokens(ctx context.Context, id uuid.UUID, accessCiphe
 		   updated_at = now()
 		 WHERE id = $4`,
 		accessCipher, refreshCipher, expiresAt, id,
+	)
+	return err
+}
+
+// UpdateConfig replaces an IMAP/SMTP channel's encrypted config and re-enables it
+// (used when a user re-connects / updates credentials for an existing mailbox).
+func (r *repository) UpdateConfig(ctx context.Context, id uuid.UUID, config json.RawMessage) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE user_channels SET config_encrypted = $1, enabled = true, updated_at = now() WHERE id = $2`,
+		config, id,
 	)
 	return err
 }

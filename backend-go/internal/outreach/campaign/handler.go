@@ -32,11 +32,13 @@ func (h *Handler) Routes() chi.Router {
 		r.Get("/contacts", h.ListContacts)
 		r.Post("/contacts", h.AddContacts)
 		r.Post("/contacts/{contactId}/approve", h.ApproveContact)
+		r.Patch("/contacts/{contactId}/draft", h.UpdateDraft)
 		r.Post("/approve-all", h.ApproveAll)
 		r.Post("/launch", h.Launch)
 		r.Post("/pause", h.Pause)
 		r.Post("/resume", h.Resume)
 		r.Post("/stop", h.Stop)
+		r.Post("/retry-failed", h.RetryFailed)
 	})
 	return r
 }
@@ -126,6 +128,8 @@ type updateRequest struct {
 	SequenceID          *uuid.UUID      `json:"sequence_id"`
 	SendPacePerDay      *int            `json:"send_pace_per_day"`
 	AttachCatalog       *bool           `json:"attach_catalog"`
+	OnPositiveAction    *string         `json:"on_positive_action"`
+	OnNegativeAction    *string         `json:"on_negative_action"`
 }
 
 func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
@@ -166,6 +170,12 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AttachCatalog != nil {
 		current.AttachCatalog = *req.AttachCatalog
+	}
+	if req.OnPositiveAction != nil {
+		current.OnPositiveAction = *req.OnPositiveAction
+	}
+	if req.OnNegativeAction != nil {
+		current.OnNegativeAction = *req.OnNegativeAction
 	}
 	saved, err := h.repo.Update(r.Context(), *current)
 	if err != nil {
@@ -277,6 +287,45 @@ func (h *Handler) ApproveContact(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// UpdateDraft persists user edits to a campaign_contact's pending draft
+// (subject + body). Only rows where the linked message is still in
+// `draft` or `pending_approval` status can be edited — once approved or
+// sent we reject so the user can't accidentally rewrite history.
+func (h *Handler) UpdateDraft(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	cid, err := uuid.Parse(chi.URLParam(r, "contactId"))
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid contactId")
+		return
+	}
+	var body struct {
+		Subject string `json:"subject"`
+		Body    string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.Subject == "" || body.Body == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "subject and body are required")
+		return
+	}
+	if err := h.svc.UpdateDraft(r.Context(), user.ID, id, cid, body.Subject, body.Body); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) ApproveAll(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
@@ -348,6 +397,25 @@ func (h *Handler) Resume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) RetryFailed(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	n, err := h.svc.RetryFailed(r.Context(), user.ID, id)
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{"retried": n})
 }
 
 func (h *Handler) Stop(w http.ResponseWriter, r *http.Request) {

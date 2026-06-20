@@ -2,6 +2,7 @@ package scoring
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -33,6 +34,7 @@ func (h *Handler) MarketRoutes() chi.Router {
 	r.Get("/", h.ListMarkets)
 	r.Get("/{marketID}", h.GetMarket)
 	r.Delete("/{marketID}", h.DeleteMarket)
+	r.Patch("/{marketID}/brand", h.AssignBrand)
 	r.Get("/{marketID}/leads", h.GetLeads)
 	r.Patch("/{marketID}/leads/{businessID}", h.UpdateLead)
 	return r
@@ -47,7 +49,12 @@ func (h *Handler) ScoringRoutes() chi.Router {
 }
 
 func (h *Handler) ListMarkets(w http.ResponseWriter, r *http.Request) {
-	markets, err := h.repo.ListMarkets(r.Context())
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	markets, err := h.repo.ListMarkets(r.Context(), user.ID)
 	if err != nil {
 		httputil.WriteError(w, http.StatusInternalServerError, "failed to list markets")
 		return
@@ -56,13 +63,18 @@ func (h *Handler) ListMarkets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetMarket(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	id, err := uuid.Parse(chi.URLParam(r, "marketID"))
 	if err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "invalid market ID")
 		return
 	}
 
-	market, err := h.repo.GetMarket(r.Context(), id)
+	market, err := h.repo.GetMarket(r.Context(), user.ID, id)
 	if err != nil {
 		httputil.MapDomainError(w, err)
 		return
@@ -71,14 +83,61 @@ func (h *Handler) GetMarket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) DeleteMarket(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	id, err := uuid.Parse(chi.URLParam(r, "marketID"))
 	if err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "invalid market ID")
 		return
 	}
 
-	if err := h.repo.DeleteMarket(r.Context(), id); err != nil {
+	if err := h.repo.DeleteMarket(r.Context(), user.ID, id); errors.Is(err, domain.ErrNotFound) {
+		httputil.WriteError(w, http.StatusNotFound, "market not found")
+		return
+	} else if err != nil {
 		httputil.WriteError(w, http.StatusInternalServerError, "failed to delete market")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// AssignBrand sets (or clears) the market's fixed sender profile (brand).
+// PATCH /markets/{marketID}/brand  body {"sender_profile_id": "<uuid>"|null}
+func (h *Handler) AssignBrand(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	marketID, err := uuid.Parse(chi.URLParam(r, "marketID"))
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid market ID")
+		return
+	}
+	var req struct {
+		SenderProfileID *string `json:"sender_profile_id"`
+	}
+	if err := httputil.DecodeJSON(r, &req); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	var profileID *uuid.UUID
+	if req.SenderProfileID != nil && *req.SenderProfileID != "" {
+		id, err := uuid.Parse(*req.SenderProfileID)
+		if err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid sender_profile_id")
+			return
+		}
+		profileID = &id
+	}
+	if err := h.repo.SetMarketSenderProfile(r.Context(), marketID, user.ID, profileID); errors.Is(err, domain.ErrNotFound) {
+		httputil.WriteError(w, http.StatusBadRequest, "brand not found or not yours")
+		return
+	} else if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to assign brand")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -130,6 +189,15 @@ func (h *Handler) GetLeads(w http.ResponseWriter, r *http.Request) {
 	marketID, err := uuid.Parse(chi.URLParam(r, "marketID"))
 	if err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "invalid market ID")
+		return
+	}
+
+	// Don't expose another tenant's market via the leads endpoint.
+	if owns, err := h.repo.UserOwnsMarket(r.Context(), user.ID, marketID); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to get leads")
+		return
+	} else if !owns {
+		httputil.WriteError(w, http.StatusNotFound, "market not found")
 		return
 	}
 

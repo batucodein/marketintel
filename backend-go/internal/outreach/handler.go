@@ -11,11 +11,14 @@ import (
 	"github.com/batuhan/marketintel/internal/outreach/channel"
 	"github.com/batuhan/marketintel/internal/outreach/compliance"
 	"github.com/batuhan/marketintel/internal/outreach/contact"
+	"github.com/batuhan/marketintel/internal/outreach/contactgroup"
 	"github.com/batuhan/marketintel/internal/outreach/conversation"
 	"github.com/batuhan/marketintel/internal/outreach/crm"
 	"github.com/batuhan/marketintel/internal/outreach/events"
+	"github.com/batuhan/marketintel/internal/outreach/group"
 	"github.com/batuhan/marketintel/internal/outreach/sender"
 	"github.com/batuhan/marketintel/internal/outreach/sequence"
+	"github.com/batuhan/marketintel/internal/outreach/simulation"
 )
 
 type Handler struct {
@@ -25,6 +28,9 @@ type Handler struct {
 	conversation *conversation.Handler
 	campaign     *campaign.Handler
 	sequence     *sequence.Handler
+	group        *group.Handler
+	contactGroup *contactgroup.Handler
+	simulation   *simulation.Handler
 	crm          *crm.Handler
 	events       *events.Handler
 	compliance   *compliance.Handler
@@ -37,6 +43,9 @@ func NewHandler(
 	convH *conversation.Handler,
 	campaignH *campaign.Handler,
 	sequenceH *sequence.Handler,
+	groupH *group.Handler,
+	contactGroupH *contactgroup.Handler,
+	simulationH *simulation.Handler,
 	crmH *crm.Handler,
 	eventsH *events.Handler,
 	complianceH *compliance.Handler,
@@ -49,6 +58,7 @@ func NewHandler(
 	return &Handler{
 		sender: senderH, contact: contactH, channel: channelH,
 		conversation: convH, campaign: campaignH, sequence: sequenceH,
+		group: groupH, contactGroup: contactGroupH, simulation: simulationH,
 		crm: crmH, events: eventsH, compliance: complianceH,
 	}
 }
@@ -73,6 +83,15 @@ func (h *Handler) Routes() chi.Router {
 	}
 	if h.sequence != nil {
 		r.Mount("/sequences", h.sequence.Routes())
+	}
+	if h.group != nil {
+		r.Mount("/groups", h.group.Routes())
+	}
+	if h.contactGroup != nil {
+		r.Mount("/contact-groups", h.contactGroup.Routes())
+	}
+	if h.simulation != nil {
+		r.Mount("/simulations", h.simulation.Routes())
 	}
 	if h.crm != nil {
 		r.Mount("/tasks", h.crm.TaskRoutes())
