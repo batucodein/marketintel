@@ -74,6 +74,23 @@ const (
 	ChannelTypeWhatsApp     = "whatsapp"
 )
 
+// SendReady reports whether the channel has the credentials it needs to
+// actually send. A channel can be enabled (listed, selectable) yet missing
+// its stored credentials — e.g. an SMTP row whose config was never
+// persisted, or an OAuth row whose tokens were cleared on disconnect.
+// Binding such a channel to a campaign fails only at send time with no
+// visible error, so callers must gate on this before binding.
+func (uc UserChannel) SendReady() bool {
+	switch uc.Type {
+	case ChannelTypeSMTP:
+		return len(uc.ConfigCipher) > 0
+	case ChannelTypeGmailOAuth, ChannelTypeOutlookOAuth:
+		return uc.OAuthRefreshTokenCipher != nil && *uc.OAuthRefreshTokenCipher != ""
+	default:
+		return true
+	}
+}
+
 // --- SenderProfile ------------------------------------------------------
 
 // SenderProfile is the "what I sell" context used for AI personalization

@@ -81,9 +81,16 @@ func (s *Service) CreateCampaign(ctx context.Context, userID uuid.UUID, c domain
 	// Validate a caller-provided channel (must be the user's + enabled), and
 	// fall back to auto-pick for any channel TYPE (gmail_oauth, smtp, …) — not
 	// just Gmail. A stale brand default / deleted channel resets to auto-pick.
+	// An account that exists but is missing its stored credentials is a HARD
+	// error — silently sending from a different account than the one the user
+	// picked is never acceptable.
 	if c.ChannelID != uuid.Nil {
-		if ch, err := s.channels.Get(ctx, userID, c.ChannelID); err != nil || ch == nil || !ch.Enabled {
+		ch, err := s.channels.Get(ctx, userID, c.ChannelID)
+		switch {
+		case err != nil || ch == nil || !ch.Enabled:
 			c.ChannelID = uuid.Nil
+		case !ch.SendReady():
+			return nil, fmt.Errorf("%s isn't fully connected — reconnect it in Settings → Email channels", ch.FromEmail)
 		}
 	}
 	if c.ChannelID == uuid.Nil {
@@ -92,14 +99,14 @@ func (s *Service) CreateCampaign(ctx context.Context, userID uuid.UUID, c domain
 			return nil, err
 		}
 		for _, ch := range chs { // prefer the default enabled account
-			if ch.Enabled && ch.IsDefault {
+			if ch.Enabled && ch.IsDefault && ch.SendReady() {
 				c.ChannelID = ch.ID
 				break
 			}
 		}
 		if c.ChannelID == uuid.Nil {
 			for _, ch := range chs { // else any enabled account, any type
-				if ch.Enabled {
+				if ch.Enabled && ch.SendReady() {
 					c.ChannelID = ch.ID
 					break
 				}
@@ -181,8 +188,10 @@ func (s *Service) ApproveContact(ctx context.Context, userID, campaignID, contac
 	if err != nil {
 		return err
 	}
-	if cc.Status != domain.CampaignContactDrafted {
-		return fmt.Errorf("can only approve drafted rows (status=%s)", cc.Status)
+	// Failed rows are re-approvable: after the user fixes the cause (e.g.
+	// reconnects the sending account) this is the "Retry" path.
+	if cc.Status != domain.CampaignContactDrafted && cc.Status != domain.CampaignContactFailed {
+		return fmt.Errorf("can only approve drafted or failed rows (status=%s)", cc.Status)
 	}
 
 	var scheduledAt *time.Time
@@ -193,7 +202,18 @@ func (s *Service) ApproveContact(ctx context.Context, userID, campaignID, contac
 		}
 		scheduledAt = &t
 	}
-	return s.repo.UpdateContactStatus(ctx, campaignID, contactID, domain.CampaignContactApproved, nil, scheduledAt)
+	if err := s.repo.UpdateContactStatus(ctx, campaignID, contactID, domain.CampaignContactApproved, nil, scheduledAt); err != nil {
+		return err
+	}
+	if cc.Status == domain.CampaignContactFailed {
+		// Clear the stale failure reason so the UI doesn't show it on a
+		// row that's back in the queue.
+		_, _ = s.pool.Exec(ctx,
+			`UPDATE campaign_contacts SET skip_reason = NULL WHERE campaign_id = $1 AND contact_id = $2`,
+			campaignID, contactID,
+		)
+	}
+	return nil
 }
 
 // nextPaceSlot computes the next scheduled_send_at for a campaign that's

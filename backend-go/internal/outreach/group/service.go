@@ -101,6 +101,9 @@ type GroupEmail struct {
 	// ScheduledSendAt is when the cold opener is set to go out (for approved,
 	// not-yet-sent rows) — so "Scheduled" shows WHEN, not the draft's date.
 	ScheduledSendAt *string `json:"scheduled_send_at"`
+	// SkipReason says WHY a row is failed/skipped (e.g. "sending account
+	// isn't fully connected") so the user can act instead of guessing.
+	SkipReason *string `json:"skip_reason"`
 	// CurrentStep / NextRunAt expose where this contact is in the follow-up
 	// cadence (from its sequence run): the next step to fire and when.
 	CurrentStep *int    `json:"current_step"`
@@ -436,14 +439,18 @@ func (s *Service) SetChannel(ctx context.Context, userID, groupID, channelID uui
 	if camp.Status != domain.CampaignStatusDraft && camp.Status != domain.CampaignStatusReady {
 		return errors.New("the sending account can only be changed before the group is launched")
 	}
-	var enabled bool
+	var ch domain.UserChannel
 	if err := s.pool.QueryRow(ctx,
-		`SELECT enabled FROM user_channels WHERE id=$1 AND user_id=$2`, channelID, userID,
-	).Scan(&enabled); err != nil {
+		`SELECT type, from_email, enabled, config_encrypted, oauth_refresh_token_encrypted
+		 FROM user_channels WHERE id=$1 AND user_id=$2`, channelID, userID,
+	).Scan(&ch.Type, &ch.FromEmail, &ch.Enabled, &ch.ConfigCipher, &ch.OAuthRefreshTokenCipher); err != nil {
 		return errors.New("email account not found")
 	}
-	if !enabled {
+	if !ch.Enabled {
 		return errors.New("that email account is disconnected — reconnect it first")
+	}
+	if !ch.SendReady() {
+		return fmt.Errorf("%s isn't fully connected — reconnect it in Settings → Email channels", ch.FromEmail)
 	}
 	_, err = s.pool.Exec(ctx,
 		`UPDATE campaigns SET channel_id=$1, updated_at=now() WHERE id=$2 AND user_id=$3`,
@@ -466,7 +473,7 @@ func (s *Service) Emails(ctx context.Context, userID, id uuid.UUID, f EmailFacet
 	             COALESCE(ARRAY(SELECT tag FROM conversation_tags WHERE conversation_id = cv.id ORDER BY tag), '{}'),
 	             COALESCE(cv.unread, false),
 	             EXISTS(SELECT 1 FROM messages pm WHERE pm.conversation_id = cv.id AND pm.status = 'pending_approval'),
-	             cc.scheduled_send_at, sr.current_step,
+	             cc.scheduled_send_at, cc.skip_reason, sr.current_step,
 	             CASE WHEN sr.status = 'active' THEN sr.next_run_at ELSE NULL END
 	      FROM campaign_contacts cc
 	      JOIN contacts ct ON ct.id = cc.contact_id
@@ -491,7 +498,7 @@ func (s *Service) Emails(ctx context.Context, userID, id uuid.UUID, f EmailFacet
 			&e.BusinessName, &e.ConversationID, &e.Subject, &e.Status,
 			&e.LastDirection, &lastAt, &e.Sentiment,
 			&e.SentimentScore, &e.SentimentLabel, &e.Tags, &e.Unread, &e.HasPendingDraft,
-			&schedAt, &e.CurrentStep, &nextRunAt); err != nil {
+			&schedAt, &e.SkipReason, &e.CurrentStep, &nextRunAt); err != nil {
 			return nil, fmt.Errorf("scan group email: %w", err)
 		}
 		// timestamptz must be scanned as time.Time (pgx binary mode rejects

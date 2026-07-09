@@ -432,19 +432,54 @@ export default function GroupDetailPage({ params }: PageProps) {
                       <Badge variant="outline" className="text-[10px] whitespace-nowrap shrink-0">
                         {STATUS_LABEL[e.status] ?? e.status}
                       </Badge>
-                      {e.status === "approved" && e.scheduled_send_at && (
+                      {e.status === "approved" &&
+                        e.scheduled_send_at &&
+                        (new Date(e.scheduled_send_at) <= new Date() ? (
+                          // Past-due but still approved: the scheduler picks it
+                          // up on its next cycle (~1 min). A stale "sends <past
+                          // time>" here read as a bug, so say what's happening.
+                          <span
+                            className="text-[10px] text-amber-600 whitespace-nowrap shrink-0"
+                            title={`Was due ${new Date(e.scheduled_send_at).toLocaleString("en-GB")} — sends on the next cycle (within a minute). If it stays like this, check the sending account in Settings → Email channels.`}
+                          >
+                            sending…
+                          </span>
+                        ) : (
+                          <span
+                            className="text-[10px] text-muted-foreground whitespace-nowrap shrink-0"
+                            title={`Scheduled to send ${new Date(e.scheduled_send_at).toLocaleString("en-GB")}`}
+                          >
+                            sends{" "}
+                            {new Date(e.scheduled_send_at).toLocaleString("en-GB", {
+                              day: "2-digit",
+                              month: "short",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </span>
+                        ))}
+                      {(e.status === "failed" || e.status === "skipped") && e.skip_reason && (
                         <span
-                          className="text-[10px] text-muted-foreground whitespace-nowrap shrink-0"
-                          title={`Scheduled to send ${new Date(e.scheduled_send_at).toLocaleString("en-GB")}`}
+                          className="text-[10px] text-red-600 truncate max-w-[280px] shrink"
+                          title={e.skip_reason}
                         >
-                          sends{" "}
-                          {new Date(e.scheduled_send_at).toLocaleString("en-GB", {
-                            day: "2-digit",
-                            month: "short",
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
+                          {e.skip_reason}
                         </span>
+                      )}
+                      {e.status === "failed" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="shrink-0"
+                          onClick={() =>
+                            action(`approve-${e.contact_id}`, () =>
+                              approveGroupContact(groupId, e.contact_id),
+                            )
+                          }
+                          disabled={busy !== null}
+                        >
+                          Retry
+                        </Button>
                       )}
                       {e.next_run_at && e.current_step != null && steps.length > 0 && (
                         <span

@@ -86,11 +86,20 @@ func (s *Scheduler) sendOne(ctx context.Context, row CampaignContactWithCampaign
 
 	uc, err := s.svc.channels.Get(ctx, camp.UserID, camp.ChannelID)
 	if err != nil {
-		return fmt.Errorf("load channel: %w", err)
+		// Channel row gone/unreadable — mark the row failed with the reason
+		// so the UI surfaces it instead of the scheduler retrying forever.
+		err = fmt.Errorf("load channel: %w", err)
+		s.markFailed(ctx, row, err)
+		return err
 	}
 	ch, err := s.svc.registry.Build(ctx, *uc)
 	if err != nil {
-		return fmt.Errorf("build channel: %w", err)
+		// The account exists but can't build a sender (e.g. credentials were
+		// never stored / can't decrypt). Permanent until the user reconnects
+		// — surface it rather than silently retrying every tick.
+		err = fmt.Errorf("sending account %s isn't fully connected — reconnect it in Settings → Email channels (%w)", uc.FromEmail, err)
+		s.markFailed(ctx, row, err)
+		return err
 	}
 
 	// Build unsubscribe URL + appended footer (CAN-SPAM compliance).
@@ -127,11 +136,7 @@ func (s *Scheduler) sendOne(ctx context.Context, row CampaignContactWithCampaign
 		// Persist the failure so the campaign UI can show it and the
 		// scheduler stops retrying every tick. The user can decide what
 		// to do (reconnect channel, manually retry later, etc.).
-		_ = s.svc.repo.UpdateContactStatus(ctx, row.CampaignID, row.ContactID, domain.CampaignContactFailed, nil, nil)
-		_, _ = s.svc.pool.Exec(ctx,
-			`UPDATE campaign_contacts SET skip_reason = $1 WHERE campaign_id = $2 AND contact_id = $3`,
-			truncErr(err), row.CampaignID, row.ContactID,
-		)
+		s.markFailed(ctx, row, err)
 		// If Google says the OAuth grant is gone, the channel is dead
 		// until the user reconnects. Flip the row so the UI's channels
 		// page surfaces "Disconnected — Reconnect" and the inbound
@@ -208,6 +213,18 @@ func (s *Scheduler) sendOne(ctx context.Context, row CampaignContactWithCampaign
 		}
 	}
 	return nil
+}
+
+// markFailed flips a queue row to failed and records why, so the group UI
+// can show the reason (and offer Retry) and the scheduler stops burning
+// ticks on a row that cannot succeed. Best-effort: if the DB write fails
+// (e.g. transient outage) the row stays approved and is retried next tick.
+func (s *Scheduler) markFailed(ctx context.Context, row CampaignContactWithCampaign, reason error) {
+	_ = s.svc.repo.UpdateContactStatus(ctx, row.CampaignID, row.ContactID, domain.CampaignContactFailed, nil, nil)
+	_, _ = s.svc.pool.Exec(ctx,
+		`UPDATE campaign_contacts SET skip_reason = $1 WHERE campaign_id = $2 AND contact_id = $3`,
+		truncErr(reason), row.CampaignID, row.ContactID,
+	)
 }
 
 // truncErr returns a DB-safe, UI-friendly version of an error message.

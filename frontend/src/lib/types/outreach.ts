@@ -338,6 +338,7 @@ export interface GroupEmail {
   unread: boolean;
   has_pending_draft: boolean;
   scheduled_send_at: string | null;
+  skip_reason: string | null;
   current_step: number | null;
   next_run_at: string | null;
 }

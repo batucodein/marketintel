@@ -46,11 +46,11 @@ func (r *repository) Create(ctx context.Context, uc domain.UserChannel) (*domain
 		`INSERT INTO user_channels (
 			id, user_id, type, display_label, from_email,
 			oauth_access_token_encrypted, oauth_refresh_token_encrypted,
-			oauth_expires_at, oauth_scope, enabled, is_default, unsubscribe_secret
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+			oauth_expires_at, oauth_scope, config_encrypted, enabled, is_default, unsubscribe_secret
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		uc.ID, uc.UserID, uc.Type, uc.DisplayLabel, uc.FromEmail,
 		uc.OAuthAccessTokenCipher, uc.OAuthRefreshTokenCipher,
-		uc.OAuthExpiresAt, uc.OAuthScope, uc.Enabled, uc.IsDefault, secret,
+		uc.OAuthExpiresAt, uc.OAuthScope, uc.ConfigCipher, uc.Enabled, uc.IsDefault, secret,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert user_channel: %w", err)
